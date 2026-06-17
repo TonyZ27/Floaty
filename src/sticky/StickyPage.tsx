@@ -14,6 +14,8 @@ export function StickyPage({ stickyId }: StickyPageProps) {
   const { sticky, setSticky, markdown, loaded, save } = useStickyData(stickyId);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [isEditing, setIsEditing] = useState(false);
+  const [tempTitle, setTempTitle] = useState("");
 
   // 便签内快捷键：⌘W / ⌘⇧P / ⌘, / ⌘⌫
   // 必须在任何 early-return 之前挂，否则 Rules of Hooks 炸。
@@ -106,6 +108,28 @@ export function StickyPage({ stickyId }: StickyPageProps) {
     }
   };
 
+  const startEditing = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (sticky) {
+      setTempTitle(sticky.title);
+      setIsEditing(true);
+    }
+  };
+
+  const onSaveTitle = async () => {
+    setIsEditing(false);
+    if (!sticky) return;
+    const trimmed = tempTitle.trim();
+    if (trimmed !== sticky.title) {
+      await onPatch({ title: trimmed });
+    }
+  };
+
+  const onCancelTitle = () => {
+    setIsEditing(false);
+  };
+
   const requestDelete = () => {
     setSettingsOpen(false);
     setConfirmDelete(true);
@@ -133,14 +157,40 @@ export function StickyPage({ stickyId }: StickyPageProps) {
         className="flex items-center justify-between px-3 py-1.5 text-xs border-b border-black/5 select-none cursor-grab active:cursor-grabbing"
         style={{ color: autoFg(sticky.bg_color) }}
       >
-        <strong data-tauri-drag-region className="pointer-events-none opacity-70 flex items-center gap-1.5">
-          <span>📋 Floaty</span>
+        <div data-tauri-drag-region className="flex items-center gap-1.5 opacity-70 flex-1 min-w-0 mr-2">
+          <span className="pointer-events-none select-none">📋</span>
+          {isEditing ? (
+            <input
+              type="text"
+              value={tempTitle}
+              onChange={(e) => setTempTitle(e.target.value)}
+              onBlur={onSaveTitle}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") onSaveTitle();
+                if (e.key === "Escape") onCancelTitle();
+              }}
+              className="bg-black/10 border border-black/10 rounded px-1 py-0.5 text-xs outline-none w-full max-w-[130px] font-semibold"
+              style={{ color: "inherit" }}
+              autoFocus
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={(e) => e.stopPropagation()}
+            />
+          ) : (
+            <span
+              className="cursor-pointer hover:bg-black/5 px-1 py-0.5 rounded font-semibold truncate max-w-[130px] select-none"
+              onDoubleClick={startEditing}
+              title="双击重命名"
+              style={{ pointerEvents: "auto" } as React.CSSProperties}
+            >
+              {sticky.title || "Floaty"}
+            </span>
+          )}
           {pinned && (
-            <span className="text-[9px] font-semibold uppercase tracking-wider px-1.5 py-[1px] rounded bg-red-500 text-white max-[240px]:hidden">
+            <span className="pointer-events-none text-[9px] font-semibold uppercase tracking-wider px-1.5 py-[1px] rounded bg-red-500 text-white max-[240px]:hidden flex-shrink-0">
               已置顶
             </span>
           )}
-        </strong>
+        </div>
         <div
           className="flex items-center gap-1"
           style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
