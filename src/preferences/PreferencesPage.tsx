@@ -213,149 +213,203 @@ export function PreferencesPage() {
   };
 
   return (
-    <div className="h-screen flex flex-col bg-white text-sm" style={{ color: "#333" }}>
-      <div className="px-4 py-3 border-b border-black/5">
-        <div className="font-semibold text-base">Floaty</div>
-        <div className="text-xs opacity-60 mt-0.5">macOS 桌面便签式 todo</div>
+    <div className="h-screen flex flex-col bg-white/95 dark:bg-zinc-900/95 text-sm" style={{ color: "#1d1d1f" }}>
+      <div className="px-4 py-3 border-b border-black/5 bg-black/[0.01]">
+        <div className="font-semibold text-[15px] tracking-tight">Floaty 设置</div>
+        <div className="text-[11px] opacity-50 mt-0.5">极简的 macOS 桌面便签式 Todo</div>
       </div>
 
-      <div className="flex-1 overflow-auto p-4 space-y-4">
-        <section>
-          <div className="text-[10px] uppercase tracking-wider opacity-60 mb-1.5">统计</div>
-          <div className="grid grid-cols-3 gap-2">
+      <div className="flex-1 overflow-auto p-4 space-y-5 bg-black/[0.01]">
+        {/* 统计 */}
+        <section className="space-y-2">
+          <div className="text-[10px] font-semibold uppercase tracking-wider opacity-40 px-1">运行统计</div>
+          <div className="grid grid-cols-3 gap-3">
             <Stat label="便签" value={stats?.stickies ?? "-"} />
             <Stat label="Todo 条数" value={stats?.items ?? "-"} />
             <Stat label="待触发提醒" value={stats?.pending_reminders ?? "-"} />
           </div>
         </section>
 
-        <section>
-          <div className="text-[10px] uppercase tracking-wider opacity-60 mb-1.5">数据目录 &amp; 备份</div>
-          <div className="text-[11px] font-mono break-all p-2 bg-black/5 rounded">{dataDir}</div>
-          <div className="mt-2 flex gap-2 flex-wrap">
-            <button
-              className="text-xs px-3 h-7 rounded border border-black/10 hover:bg-black/5"
-              onClick={openDataDir}
-            >
-              {IS_MAC ? "在 Finder 中显示" : "在资源管理器中显示"}
-            </button>
-            <button
-              className="text-xs px-3 h-7 rounded border border-black/10 hover:bg-black/5 disabled:opacity-50"
-              onClick={runBackup}
-              disabled={backupStatus.kind === "running"}
-            >
-              {backupStatus.kind === "running" ? "正在备份…" : "立即备份到…"}
-            </button>
+        {/* 启动与快捷键 */}
+        <section className="space-y-2">
+          <div className="text-[10px] font-semibold uppercase tracking-wider opacity-40 px-1">通用设置</div>
+          <div className="rounded-xl border border-black/5 bg-white shadow-sm p-3 divide-y divide-black/5">
+            <div className="flex items-center justify-between py-2">
+              <div className="flex flex-col gap-0.5">
+                <span className="text-xs font-semibold text-black/85">开机自动启动</span>
+                <span className="text-[10px] opacity-50 font-medium">macOS LaunchAgent 自动加载</span>
+              </div>
+              <label className="ios-switch">
+                <input
+                  type="checkbox"
+                  checked={autostart}
+                  onChange={(e) => toggleAutostart(e.target.checked)}
+                />
+                <span className="ios-switch-track">
+                  <span className="ios-switch-thumb" />
+                </span>
+              </label>
+            </div>
+            
+            <div className="flex items-center justify-between py-2">
+              <div className="flex flex-col gap-0.5 pr-2">
+                <span className="text-xs font-semibold text-black/85">启用全局快捷键</span>
+                <span className="text-[10px] opacity-50 font-medium">
+                  在任何 App 下按 <Kbd>{kbd(["mod", "shift", "N"])}</Kbd> 快速新建便签
+                </span>
+              </div>
+              <label className="ios-switch">
+                <input
+                  type="checkbox"
+                  checked={globalEnabled}
+                  onChange={(e) => toggleGlobal(e.target.checked)}
+                />
+                <span className="ios-switch-track">
+                  <span className="ios-switch-thumb" />
+                </span>
+              </label>
+            </div>
           </div>
-          {backupStatus.kind === "done" && (
-            <div className="mt-2 text-[11px] flex items-center gap-2 flex-wrap">
-              <span className="opacity-70">已备份到：</span>
-              <span className="font-mono break-all">{backupStatus.path}</span>
+        </section>
+
+        {/* 编辑器 */}
+        <section className="space-y-2">
+          <div className="text-[10px] font-semibold uppercase tracking-wider opacity-40 px-1">编辑器配置</div>
+          <div className="rounded-xl border border-black/5 bg-white shadow-sm p-3 divide-y divide-black/5">
+            <div className="flex items-center justify-between py-2.5">
+              <div className="flex flex-col gap-0.5 pr-4">
+                <span className="text-xs font-semibold text-black/85">选中文字时显示格式工具栏</span>
+                <span className="text-[10px] opacity-50 font-medium">提供粗斜体、删除线、行内码等格式快捷工具</span>
+              </div>
+              <label className="ios-switch flex-shrink-0">
+                <input
+                  type="checkbox"
+                  checked={bubbleEnabled}
+                  onChange={(e) => toggleBubble(e.target.checked)}
+                />
+                <span className="ios-switch-track">
+                  <span className="ios-switch-thumb" />
+                </span>
+              </label>
+            </div>
+
+            <div className="flex items-center justify-between py-2.5">
+              <div className="flex flex-col gap-0.5 pr-4">
+                <span className="text-xs font-semibold text-black/85">空行时显示悬浮菜单</span>
+                <span className="text-[10px] opacity-50 font-medium">在空行左侧显示待办、有序列表及引用的快捷插入按钮</span>
+              </div>
+              <label className="ios-switch flex-shrink-0">
+                <input
+                  type="checkbox"
+                  checked={floatingEnabled}
+                  onChange={(e) => toggleFloating(e.target.checked)}
+                />
+                <span className="ios-switch-track">
+                  <span className="ios-switch-thumb" />
+                </span>
+              </label>
+            </div>
+          </div>
+        </section>
+
+        {/* 数据备份 */}
+        <section className="space-y-2">
+          <div className="text-[10px] font-semibold uppercase tracking-wider opacity-40 px-1">数据存储与备份</div>
+          <div className="rounded-xl border border-black/5 bg-white shadow-sm p-3 space-y-3">
+            <div>
+              <div className="text-[10px] opacity-50 mb-1">当前数据目录</div>
+              <div className="text-[10.5px] font-mono break-all p-2 bg-black/[0.03] rounded-lg border border-black/[0.02]">{dataDir}</div>
+            </div>
+            <div className="flex gap-2 pt-1">
               <button
-                className="text-[11px] px-2 h-6 rounded border border-black/10 hover:bg-black/5"
-                onClick={() => revealBackup(backupStatus.path)}
+                className="text-xs px-3 h-8 rounded-lg border border-black/10 hover:bg-black/5 transition active:scale-[0.97]"
+                onClick={openDataDir}
               >
-                {IS_MAC ? "在 Finder 打开" : "打开所在文件夹"}
+                {IS_MAC ? "在 Finder 中显示" : "在资源管理器中显示"}
+              </button>
+              <button
+                className="text-xs px-3 h-8 rounded-lg bg-black text-white hover:bg-black/85 disabled:opacity-50 transition active:scale-[0.97]"
+                onClick={runBackup}
+                disabled={backupStatus.kind === "running"}
+              >
+                {backupStatus.kind === "running" ? "正在备份..." : "立即备份..."}
               </button>
             </div>
-          )}
-          {backupStatus.kind === "error" && (
-            <div className="mt-2 text-[11px] text-red-600">备份失败：{backupStatus.message}</div>
-          )}
-        </section>
-
-        <section>
-          <div className="text-[10px] uppercase tracking-wider opacity-60 mb-1.5">关于 &amp; 更新</div>
-          <div className="text-xs mb-2">
-            当前版本：<span className="font-mono">{currentVersion || "—"}</span>
-          </div>
-          <UpdatePanel
-            status={updateStatus}
-            onCheck={checkForUpdate}
-            onInstall={downloadAndInstall}
-          />
-        </section>
-
-        <section>
-          <div className="text-[10px] uppercase tracking-wider opacity-60 mb-1.5">启动</div>
-          <label className="flex items-center gap-2 text-xs cursor-pointer">
-            <input
-              type="checkbox"
-              checked={autostart}
-              onChange={(e) => toggleAutostart(e.target.checked)}
-            />
-            <span>开机自动启动 Floaty（macOS LaunchAgent）</span>
-          </label>
-        </section>
-
-        <section>
-          <div className="text-[10px] uppercase tracking-wider opacity-60 mb-1.5">编辑器</div>
-          <label className="flex items-center gap-2 text-xs cursor-pointer mb-1.5">
-            <input
-              type="checkbox"
-              checked={bubbleEnabled}
-              onChange={(e) => toggleBubble(e.target.checked)}
-            />
-            <span>选中文字时显示格式工具栏（粗斜 / 删除线 / 行内码 / 标题 / 链接）</span>
-          </label>
-          <label className="flex items-center gap-2 text-xs cursor-pointer">
-            <input
-              type="checkbox"
-              checked={floatingEnabled}
-              onChange={(e) => toggleFloating(e.target.checked)}
-            />
-            <span>空行时显示插入工具栏（待办 / 列表 / 有序 / 标题 / 引用）</span>
-          </label>
-        </section>
-
-        <section>
-          <div className="text-[10px] uppercase tracking-wider opacity-60 mb-1.5">快捷键</div>
-          <label className="flex items-center gap-2 text-xs cursor-pointer mb-2">
-            <input
-              type="checkbox"
-              checked={globalEnabled}
-              onChange={(e) => toggleGlobal(e.target.checked)}
-            />
-            <span>
-              启用全局 <Kbd>{kbd(["mod", "shift", "N"])}</Kbd>（任何 app 下都能快速新建便签）
-            </span>
-          </label>
-          <div className="text-[11px] space-y-1 opacity-85">
-            <Row k={kbd(["mod", "shift", "N"])} d="全局：新建便签" />
-            <Row k={kbd(["mod", "N"])} d="便签聚焦时：新建便签" />
-            <Row k={kbd(["mod", "W"])} d="隐藏当前便签（不删除）" />
-            <Row k={kbd(["mod", "shift", "P"])} d="切换置顶" />
-            <Row k={kbd(["mod", ","])} d="打开/关闭外观设置" />
-            <Row k={kbd(["mod", "backspace"])} d="删除当前便签（带确认）" />
-            <Row k="@" d="编辑区：打开时间选择器" />
-            <Row k={kbd(["tab"])} d="编辑区：接受时间 ghost 预览" />
-          </div>
-          <div className="text-[10px] opacity-50 mt-2">
-            快捷键自定义功能后续版本提供。
+            {backupStatus.kind === "done" && (
+              <div className="mt-2 p-2.5 rounded-lg bg-emerald-50 text-[10.5px] text-emerald-800 border border-emerald-100 flex flex-col gap-1.5">
+                <span className="font-semibold">备份成功：</span>
+                <span className="font-mono break-all opacity-90">{backupStatus.path}</span>
+                <button
+                  className="self-start text-[10px] px-2 h-6 rounded border border-emerald-200 bg-white hover:bg-emerald-50 text-emerald-800 transition active:scale-[0.97]"
+                  onClick={() => revealBackup(backupStatus.path)}
+                >
+                  {IS_MAC ? "在 Finder 打开" : "打开所在文件夹"}
+                </button>
+              </div>
+            )}
+            {backupStatus.kind === "error" && (
+              <div className="mt-2 p-2 rounded-lg bg-red-50 text-[10.5px] text-red-800 border border-red-100 font-medium">
+                备份失败：{backupStatus.message}
+              </div>
+            )}
           </div>
         </section>
 
-        <section>
-          <div className="text-[10px] uppercase tracking-wider opacity-60 mb-1.5">操作</div>
+        {/* 关于和更新 */}
+        <section className="space-y-2">
+          <div className="text-[10px] font-semibold uppercase tracking-wider opacity-40 px-1">关于 Floaty</div>
+          <div className="rounded-xl border border-black/5 bg-white shadow-sm p-3 flex flex-col gap-2.5">
+            <div className="flex justify-between items-center text-xs">
+              <span className="font-semibold text-black/85">软件版本</span>
+              <span className="font-mono bg-black/[0.04] px-2 py-0.5 rounded-md border border-black/[0.02]">{currentVersion || "—"}</span>
+            </div>
+            <div className="pt-2 border-t border-black/5">
+              <UpdatePanel
+                status={updateStatus}
+                onCheck={checkForUpdate}
+                onInstall={downloadAndInstall}
+              />
+            </div>
+          </div>
+        </section>
+
+        {/* 快捷键 */}
+        <section className="space-y-2">
+          <div className="text-[10px] font-semibold uppercase tracking-wider opacity-40 px-1">快捷键参考</div>
+          <div className="rounded-xl border border-black/5 bg-white shadow-sm p-3 divide-y divide-black/5 text-[11px] space-y-0.5">
+            <div className="py-2.5"><Row k={kbd(["mod", "shift", "N"])} d="全局：新建便签" /></div>
+            <div className="py-2.5"><Row k={kbd(["mod", "N"])} d="便签聚焦时：新建便签" /></div>
+            <div className="py-2.5"><Row k={kbd(["mod", "W"])} d="隐藏当前便签 (不删除)" /></div>
+            <div className="py-2.5"><Row k={kbd(["mod", "shift", "P"])} d="切换置顶状态" /></div>
+            <div className="py-2.5"><Row k={kbd(["mod", ","])} d="打开/关闭外观设置" /></div>
+            <div className="py-2.5"><Row k={kbd(["mod", "backspace"])} d="删除当前便签" /></div>
+            <div className="py-2.5"><Row k="@" d="编辑区：打开时间选择器" /></div>
+            <div className="py-2.5"><Row k={kbd(["tab"])} d="编辑区：接受时间预览" /></div>
+          </div>
+          <div className="text-[10px] opacity-45 px-1">
+            快捷键自定义功能将在后续版本中提供。
+          </div>
+        </section>
+
+        {/* 操作与帮助 */}
+        <section className="space-y-2.5">
+          <div className="text-[10px] font-semibold uppercase tracking-wider opacity-40 px-1">日常操作</div>
           <div className="flex gap-2 flex-wrap">
             <button
-              className="text-xs px-3 h-7 rounded border border-black/10 hover:bg-black/5"
+              className="text-xs px-3 h-8 rounded-lg bg-black text-white hover:bg-black/85 transition active:scale-[0.97]"
               onClick={newSticky}
             >
               ＋ 新建便签
             </button>
             <button
-              className="text-xs px-3 h-7 rounded border border-black/10 hover:bg-black/5"
+              className="text-xs px-3 h-8 rounded-lg border border-black/10 hover:bg-black/5 transition active:scale-[0.97]"
               onClick={openWelcome}
             >
               📖 打开上手指南
             </button>
           </div>
-        </section>
-
-        <section className="pt-2 border-t border-black/5">
-          <div className="text-[10px] opacity-50">
-            关闭所有便签后 app 仍在菜单栏常驻。从菜单栏图标随时恢复便签或新建。
+          <div className="pt-3 border-t border-black/5 text-[10px] opacity-45 leading-relaxed">
+            关闭所有便签后 App 仍在 macOS 菜单栏常驻。点击菜单栏图标可随时恢复或新建便签。
           </div>
         </section>
       </div>
@@ -365,9 +419,9 @@ export function PreferencesPage() {
 
 function Stat({ label, value }: { label: string; value: number | string }) {
   return (
-    <div className="rounded border border-black/10 p-2 text-center">
-      <div className="text-[10px] opacity-60">{label}</div>
-      <div className="text-lg font-semibold">{value}</div>
+    <div className="rounded-xl border border-black/5 bg-white shadow-sm p-3 text-center transition hover:shadow-md hover:scale-[1.01]">
+      <div className="text-[10px] font-semibold uppercase tracking-wider opacity-45 mb-1">{label}</div>
+      <div className="text-xl font-bold tracking-tight text-black">{value}</div>
     </div>
   );
 }
@@ -399,7 +453,7 @@ function UpdatePanel({
   onInstall: (u: Update) => void;
 }) {
   const btn =
-    "text-xs px-3 h-7 rounded border border-black/10 hover:bg-black/5 disabled:opacity-50";
+    "text-xs px-3 h-8 rounded-lg border border-black/10 hover:bg-black/5 disabled:opacity-50 transition active:scale-[0.97]";
 
   if (status.kind === "idle") {
     return (
@@ -411,16 +465,16 @@ function UpdatePanel({
   if (status.kind === "checking") {
     return (
       <button className={btn} disabled>
-        正在检查…
+        正在检查更新...
       </button>
     );
   }
   if (status.kind === "up-to-date") {
     return (
       <div className="flex items-center gap-2">
-        <span className="text-xs opacity-70">已是最新版本</span>
+        <span className="text-xs opacity-55 font-medium">已是最新版本</span>
         <button className={btn} onClick={onCheck}>
-          再次检查
+          重新检查
         </button>
       </div>
     );
@@ -428,20 +482,20 @@ function UpdatePanel({
   if (status.kind === "available") {
     const u = status.update;
     return (
-      <div>
-        <div className="text-xs mb-1.5">
-          发现新版本 <span className="font-mono">{u.version}</span>
+      <div className="space-y-2">
+        <div className="text-xs font-semibold">
+          发现新版本 <span className="font-mono bg-black/[0.04] px-1.5 py-0.5 rounded-md border border-black/[0.02]">{u.version}</span>
           {u.date && (
-            <span className="opacity-50 ml-1.5">{u.date.split(" ")[0]}</span>
+            <span className="opacity-55 ml-2 text-[10px]">{u.date.split(" ")[0]}</span>
           )}
         </div>
         {u.body && (
-          <div className="text-[11px] opacity-75 whitespace-pre-wrap mb-2 p-2 bg-black/5 rounded max-h-32 overflow-auto">
+          <div className="text-[11px] opacity-75 whitespace-pre-wrap p-2.5 bg-black/[0.03] border border-black/[0.02] rounded-lg max-h-32 overflow-auto leading-relaxed">
             {u.body}
           </div>
         )}
-        <button className={btn} onClick={() => onInstall(u)}>
-          下载并安装
+        <button className="text-xs px-3 h-8 rounded-lg bg-black text-white hover:bg-black/85 transition active:scale-[0.97]" onClick={() => onInstall(u)}>
+          下载并安装更新
         </button>
       </div>
     );
@@ -452,13 +506,13 @@ function UpdatePanel({
         ? Math.round((status.received / status.total) * 100)
         : null;
     return (
-      <div>
-        <div className="text-xs mb-1">
-          下载中… {pct !== null ? `${pct}%` : `${(status.received / 1024 / 1024).toFixed(1)} MB`}
+      <div className="space-y-1.5">
+        <div className="text-xs font-semibold opacity-70">
+          下载中... {pct !== null ? `${pct}%` : `${(status.received / 1024 / 1024).toFixed(1)} MB`}
         </div>
-        <div className="h-1 bg-black/10 rounded overflow-hidden">
+        <div className="h-1.5 bg-black/5 rounded-full overflow-hidden">
           <div
-            className="h-full bg-black/40 transition-all"
+            className="h-full bg-black transition-all duration-300"
             style={{ width: pct !== null ? `${pct}%` : "33%" }}
           />
         </div>
@@ -466,11 +520,11 @@ function UpdatePanel({
     );
   }
   if (status.kind === "installed") {
-    return <div className="text-xs opacity-70">安装完成，正在重启…</div>;
+    return <div className="text-xs font-medium opacity-65">安装完成，正在重新启动...</div>;
   }
   return (
-    <div>
-      <div className="text-xs text-red-600 mb-1.5">更新失败：{status.message}</div>
+    <div className="space-y-2">
+      <div className="text-xs text-red-600 font-semibold">更新失败：{status.message}</div>
       <button className={btn} onClick={onCheck}>
         重试
       </button>

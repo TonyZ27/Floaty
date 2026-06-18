@@ -5,6 +5,7 @@ import { SettingsPopover } from "./SettingsPopover";
 import { ipc } from "../ipc/client";
 import { autoFg } from "../theme/contrast";
 import type { StickyPatch } from "../ipc/types";
+import { FileText, Pin, Settings, X } from "lucide-react";
 
 interface StickyPageProps {
   stickyId: string;
@@ -146,7 +147,7 @@ export function StickyPage({ stickyId }: StickyPageProps) {
 
   return (
     <div
-      className="h-screen flex flex-col backdrop-blur-md relative"
+      className="h-screen flex flex-col backdrop-blur-md relative rounded-[16px] overflow-hidden border border-black/[0.08] dark:border-white/10 shadow-lg"
       style={{
         backgroundColor: hexWithAlpha(sticky.bg_color, sticky.opacity),
       }}
@@ -154,11 +155,11 @@ export function StickyPage({ stickyId }: StickyPageProps) {
     >
       <div
         data-tauri-drag-region
-        className="flex items-center justify-between px-3 py-1.5 text-xs border-b border-black/5 select-none cursor-grab active:cursor-grabbing"
+        className="flex items-center justify-between px-3 py-2 text-xs border-b border-black/5 select-none cursor-grab active:cursor-grabbing"
         style={{ color: autoFg(sticky.bg_color) }}
       >
-        <div data-tauri-drag-region className="flex items-center gap-1.5 opacity-70 flex-1 min-w-0 mr-2">
-          <span className="pointer-events-none select-none">📋</span>
+        <div data-tauri-drag-region className="flex items-center gap-1.5 opacity-80 flex-1 min-w-0 mr-2">
+          <FileText size={13} className="opacity-70 pointer-events-none select-none" />
           {isEditing ? (
             <input
               type="text"
@@ -169,7 +170,7 @@ export function StickyPage({ stickyId }: StickyPageProps) {
                 if (e.key === "Enter") onSaveTitle();
                 if (e.key === "Escape") onCancelTitle();
               }}
-              className="bg-black/10 border border-black/10 rounded px-1 py-0.5 text-xs outline-none w-full max-w-[130px] font-semibold"
+              className="bg-black/10 border border-black/10 rounded px-1.5 py-0.5 text-xs outline-none w-full max-w-[130px] font-semibold"
               style={{ color: "inherit" }}
               autoFocus
               onMouseDown={(e) => e.stopPropagation()}
@@ -177,7 +178,7 @@ export function StickyPage({ stickyId }: StickyPageProps) {
             />
           ) : (
             <span
-              className="cursor-pointer hover:bg-black/5 px-1 py-0.5 rounded font-semibold truncate max-w-[130px] select-none"
+              className="cursor-pointer hover:bg-black/5 px-1.5 py-0.5 rounded font-semibold truncate max-w-[130px] select-none transition-colors duration-150"
               onDoubleClick={startEditing}
               title="双击重命名"
               style={{ pointerEvents: "auto" } as React.CSSProperties}
@@ -186,7 +187,7 @@ export function StickyPage({ stickyId }: StickyPageProps) {
             </span>
           )}
           {pinned && (
-            <span className="pointer-events-none text-[9px] font-semibold uppercase tracking-wider px-1.5 py-[1px] rounded bg-red-500 text-white max-[240px]:hidden flex-shrink-0">
+            <span className="pointer-events-none text-[9px] font-semibold uppercase tracking-wider px-1.5 py-[2px] rounded bg-red-500 text-white max-[240px]:hidden flex-shrink-0 shadow-sm shadow-red-500/20">
               已置顶
             </span>
           )}
@@ -198,38 +199,38 @@ export function StickyPage({ stickyId }: StickyPageProps) {
         >
           <button
             type="button"
-            className={
+            className={`w-6 h-6 flex items-center justify-center rounded-md transition-all duration-150 active:scale-[0.92] ${
               pinned
-                ? "text-[12px] w-6 h-5 rounded bg-red-500 text-white shadow-sm"
-                : "text-[12px] w-6 h-5 rounded opacity-40 hover:opacity-80 hover:bg-black/5"
-            }
+                ? "bg-red-500/20 text-red-600 hover:bg-red-500/30"
+                : "opacity-45 hover:opacity-90 hover:bg-black/5"
+            }`}
             onClick={onTogglePin}
             title={pinned ? "已置顶（点击取消）" : "置顶"}
             style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
           >
-            📌
+            <Pin size={13} strokeWidth={2.2} className={pinned ? "rotate-45" : ""} />
           </button>
           <button
             type="button"
-            className={
+            className={`w-6 h-6 flex items-center justify-center rounded-md transition-all duration-150 active:scale-[0.92] ${
               settingsOpen
-                ? "text-[11px] w-6 h-5 rounded bg-black/10"
-                : "text-[11px] w-6 h-5 rounded opacity-40 hover:opacity-80 hover:bg-black/5"
-            }
+                ? "bg-black/10 opacity-95"
+                : "opacity-45 hover:opacity-90 hover:bg-black/5"
+            }`}
             onClick={toggleSettings}
             title="外观设置"
             style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
           >
-            ⚙
+            <Settings size={13} strokeWidth={2.2} />
           </button>
           <button
             type="button"
-            className="text-[11px] w-6 h-5 rounded opacity-40 hover:opacity-80 hover:bg-black/5"
+            className="w-6 h-6 flex items-center justify-center rounded-md opacity-45 hover:opacity-90 hover:bg-black/5 hover:text-red-500 transition-all duration-150 active:scale-[0.92]"
             onClick={onClose}
             title="关闭（不删除，可从菜单栏恢复）"
             style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
           >
-            ✕
+            <X size={13} strokeWidth={2.2} />
           </button>
         </div>
       </div>
@@ -249,29 +250,28 @@ export function StickyPage({ stickyId }: StickyPageProps) {
       )}
       {confirmDelete && (
         <div
-          className="absolute inset-0 z-20 flex items-center justify-center"
-          style={{ backgroundColor: "rgba(0,0,0,0.35)" }}
+          className="absolute inset-0 z-20 flex items-center justify-center backdrop-blur-md bg-black/15"
           onClick={() => setConfirmDelete(false)}
           onMouseDown={(e) => e.stopPropagation()}
         >
           <div
-            className="bg-white rounded-lg shadow-xl p-3 w-[90%] max-w-[260px] text-xs"
-            style={{ color: "#333" }}
+            className="bg-white/95 dark:bg-zinc-900/95 rounded-xl border border-white/20 shadow-2xl p-4 w-[90%] max-w-[260px] text-xs flex flex-col gap-1 transition-all"
+            style={{ color: "#1d1d1f" }}
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="font-semibold mb-1">删除这张便签？</div>
-            <div className="opacity-70 mb-3 leading-relaxed">
+            <div className="font-semibold text-[13px] tracking-tight">删除这张便签？</div>
+            <div className="opacity-70 mb-3 leading-relaxed text-[11px]">
               所有内容和提醒会被永久删除，无法恢复。
             </div>
             <div className="flex gap-2 justify-end">
               <button
-                className="px-3 h-7 rounded border border-black/10 hover:bg-black/5"
+                className="px-3 h-7 rounded-md border border-black/10 hover:bg-black/5 text-[11px] font-medium transition active:scale-[0.98]"
                 onClick={() => setConfirmDelete(false)}
               >
                 取消
               </button>
               <button
-                className="px-3 h-7 rounded bg-red-500 text-white hover:bg-red-600"
+                className="px-3 h-7 rounded-md bg-red-500 text-white hover:bg-red-600 font-medium text-[11px] transition active:scale-[0.98] shadow-sm shadow-red-500/10"
                 onClick={performDelete}
               >
                 删除

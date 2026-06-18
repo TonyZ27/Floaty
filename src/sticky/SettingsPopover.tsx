@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { Sticky, StickyPatch } from "../ipc/types";
 import { autoFg } from "../theme/contrast";
+import { X, RotateCcw, Trash2 } from "lucide-react";
 
 interface SettingsPopoverProps {
   sticky: Sticky;
@@ -70,40 +71,42 @@ export function SettingsPopover({ sticky, onPatch, onClose, onDelete }: Settings
 
   return (
     <div
-      className="absolute top-[34px] left-2 right-2 z-10 rounded-lg shadow-xl border border-black/10 overflow-hidden flex flex-col"
+      className="absolute top-[38px] left-2 right-2 z-10 glass-panel rounded-xl overflow-hidden flex flex-col transition-all duration-200"
       style={{
-        backgroundColor: "rgba(255,255,255,0.96)",
-        color: "#333",
-        maxHeight: "calc(100vh - 44px)",
+        color: "#1d1d1f",
+        maxHeight: "calc(100vh - 46px)",
         maxWidth: "280px",
         marginLeft: "auto",
       }}
       onClick={(e) => e.stopPropagation()}
       onMouseDown={(e) => e.stopPropagation()}
     >
-      <div className="flex items-center justify-between px-3 py-2 border-b border-black/5 flex-shrink-0">
-        <strong className="text-xs">外观设置</strong>
-        <button className="text-xs opacity-60 hover:opacity-100" onClick={onClose}>
-          ✕
+      <div className="flex items-center justify-between px-3 py-2.5 border-b border-black/5 flex-shrink-0">
+        <strong className="text-xs font-semibold">外观设置</strong>
+        <button
+          className="w-5 h-5 flex items-center justify-center rounded-full hover:bg-black/5 opacity-60 hover:opacity-100 transition-all active:scale-90"
+          onClick={onClose}
+        >
+          <X size={12} strokeWidth={2.5} />
         </button>
       </div>
 
-      <div className="p-3 space-y-3 text-xs overflow-y-auto">
+      <div className="p-3 space-y-3.5 text-xs overflow-y-auto">
         {/* 便签标题 */}
         <div>
-          <div className="text-[10px] uppercase tracking-wider opacity-60 mb-1.5">便签标题</div>
+          <div className="text-[10px] font-semibold uppercase tracking-wider opacity-50 mb-1.5">便签标题</div>
           <input
             type="text"
             placeholder="未命名 (自动从第一行提取)"
             value={sticky.title}
             onChange={(e) => onPatch({ title: e.target.value })}
-            className="w-full h-8 rounded border border-black/10 px-2 outline-none text-xs focus:border-black/30 bg-transparent"
+            className="w-full h-8 px-2.5 outline-none text-xs glass-input"
           />
         </div>
 
         {/* 主题 — 一键切整套配色 */}
         <div>
-          <div className="text-[10px] uppercase tracking-wider opacity-60 mb-1.5">主题</div>
+          <div className="text-[10px] font-semibold uppercase tracking-wider opacity-50 mb-1.5">快捷主题</div>
           <div className="grid grid-cols-3 gap-1.5">
             {THEMES.map((t) => {
               const selected =
@@ -112,8 +115,8 @@ export function SettingsPopover({ sticky, onPatch, onClose, onDelete }: Settings
               return (
                 <button
                   key={t.name}
-                  className={`h-12 rounded border-2 text-[10px] font-medium flex items-center justify-center transition ${
-                    selected ? "border-black/40" : "border-transparent hover:border-black/15"
+                  className={`h-11 rounded-lg border-2 text-[10px] font-semibold flex items-center justify-center transition active:scale-[0.95] ${
+                    selected ? "border-black/45 shadow-sm" : "border-transparent hover:border-black/10"
                   }`}
                   style={{ backgroundColor: t.bg, color: t.fg }}
                   onClick={() => {
@@ -136,15 +139,15 @@ export function SettingsPopover({ sticky, onPatch, onClose, onDelete }: Settings
 
         {/* 背景色 */}
         <div>
-          <div className="text-[10px] uppercase tracking-wider opacity-60 mb-1.5">背景色</div>
-          <div className="grid grid-cols-8 gap-1">
+          <div className="text-[10px] font-semibold uppercase tracking-wider opacity-50 mb-1.5">背景色</div>
+          <div className="grid grid-cols-8 gap-1.5">
             {PRESET_COLORS.map((c) => (
               <button
                 key={c.value}
-                className={`h-6 rounded border-2 ${
+                className={`h-5 w-5 rounded-full border-2 transition active:scale-[0.9] ${
                   sticky.bg_color.toLowerCase() === c.value.toLowerCase()
-                    ? "border-black/40"
-                    : "border-transparent"
+                    ? "border-black/50 scale-110 shadow-sm"
+                    : "border-transparent hover:scale-105"
                 }`}
                 style={{ backgroundColor: c.value }}
                 onClick={() => applyBg(c.value)}
@@ -152,22 +155,24 @@ export function SettingsPopover({ sticky, onPatch, onClose, onDelete }: Settings
               />
             ))}
           </div>
-          <div className="mt-2 flex items-center gap-2">
-            <input
-              type="color"
-              value={sticky.bg_color}
-              onChange={(e) => applyBg(e.target.value.toUpperCase())}
-              className="h-6 w-10 rounded cursor-pointer"
-            />
-            <span className="font-mono text-[10px] opacity-70">{sticky.bg_color}</span>
+          <div className="mt-2.5 flex items-center gap-2">
+            <div className="relative w-8 h-6 rounded-md overflow-hidden border border-black/10 active:scale-[0.95] transition">
+              <input
+                type="color"
+                value={sticky.bg_color}
+                onChange={(e) => applyBg(e.target.value.toUpperCase())}
+                className="absolute inset-0 w-full h-full p-0 border-0 cursor-pointer scale-150 bg-transparent"
+              />
+            </div>
+            <span className="font-mono text-[10px] font-medium opacity-65 tracking-wider">{sticky.bg_color}</span>
           </div>
         </div>
 
         {/* 透明度 */}
         <div>
-          <div className="flex items-center justify-between mb-1.5">
-            <span className="text-[10px] uppercase tracking-wider opacity-60">透明度</span>
-            <span className="font-mono text-[10px] opacity-70">
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-[10px] font-semibold uppercase tracking-wider opacity-50">透明度</span>
+            <span className="font-mono text-[10px] font-medium opacity-65">
               {Math.round(sticky.opacity * 100)}%
             </span>
           </div>
@@ -178,14 +183,14 @@ export function SettingsPopover({ sticky, onPatch, onClose, onDelete }: Settings
             step={5}
             value={Math.round(sticky.opacity * 100)}
             onChange={(e) => onPatch({ opacity: Number(e.target.value) / 100 })}
-            className="w-full"
+            className="w-full accent-black"
           />
         </div>
 
         {/* 字号 */}
         <div>
-          <div className="text-[10px] uppercase tracking-wider opacity-60 mb-1.5">字号</div>
-          <div className="flex gap-1">
+          <div className="text-[10px] font-semibold uppercase tracking-wider opacity-50 mb-1.5">字体大小</div>
+          <div className="flex gap-1 bg-black/[0.04] p-0.5 rounded-lg border border-black/[0.02]">
             {[
               { label: "小", val: 12 },
               { label: "中", val: 14 },
@@ -193,14 +198,14 @@ export function SettingsPopover({ sticky, onPatch, onClose, onDelete }: Settings
             ].map((o) => (
               <button
                 key={o.val}
-                className={`flex-1 h-7 rounded border ${
+                className={`flex-1 h-7 rounded-md text-xs font-semibold transition active:scale-[0.97] ${
                   sticky.font_size === o.val
-                    ? "border-black/40 bg-black/5"
-                    : "border-black/10 hover:bg-black/5"
+                    ? "bg-white shadow-sm border border-black/[0.02] text-black"
+                    : "text-black/60 hover:text-black"
                 }`}
                 onClick={() => onPatch({ font_size: o.val })}
               >
-                <span style={{ fontSize: `${o.val}px` }}>{o.label}</span>
+                <span>{o.label}</span>
               </button>
             ))}
           </div>
@@ -208,23 +213,23 @@ export function SettingsPopover({ sticky, onPatch, onClose, onDelete }: Settings
 
         {/* 字体颜色 */}
         <div>
-          <div className="text-[10px] uppercase tracking-wider opacity-60 mb-1.5">字体颜色</div>
-          <div className="flex gap-1 mb-2">
+          <div className="text-[10px] font-semibold uppercase tracking-wider opacity-50 mb-1.5">字体颜色</div>
+          <div className="flex gap-1 bg-black/[0.04] p-0.5 rounded-lg border border-black/[0.02] mb-2.5">
             <button
-              className={`flex-1 h-6 rounded border text-[11px] ${
+              className={`flex-1 h-6 rounded-md text-[11px] font-semibold transition active:scale-[0.97] ${
                 fontColorAuto
-                  ? "border-black/40 bg-black/5 font-medium"
-                  : "border-black/10 hover:bg-black/5"
+                  ? "bg-white shadow-sm border border-black/[0.02] text-black"
+                  : "text-black/50 hover:text-black"
               }`}
               onClick={() => toggleAuto(true)}
             >
               自动
             </button>
             <button
-              className={`flex-1 h-6 rounded border text-[11px] ${
+              className={`flex-1 h-6 rounded-md text-[11px] font-semibold transition active:scale-[0.97] ${
                 !fontColorAuto
-                  ? "border-black/40 bg-black/5 font-medium"
-                  : "border-black/10 hover:bg-black/5"
+                  ? "bg-white shadow-sm border border-black/[0.02] text-black"
+                  : "text-black/50 hover:text-black"
               }`}
               onClick={() => toggleAuto(false)}
             >
@@ -232,14 +237,16 @@ export function SettingsPopover({ sticky, onPatch, onClose, onDelete }: Settings
             </button>
           </div>
           <div className="flex items-center gap-2">
-            <input
-              type="color"
-              value={sticky.font_color ?? autoFg(sticky.bg_color)}
-              disabled={fontColorAuto}
-              onChange={(e) => onPatch({ font_color: e.target.value.toUpperCase() })}
-              className="h-6 w-10 rounded cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
-            />
-            <span className="font-mono text-[10px] opacity-70">
+            <div className={`relative w-8 h-6 rounded-md overflow-hidden border border-black/10 active:scale-[0.95] transition ${fontColorAuto ? "opacity-40 cursor-not-allowed" : ""}`}>
+              <input
+                type="color"
+                value={sticky.font_color ?? autoFg(sticky.bg_color)}
+                disabled={fontColorAuto}
+                onChange={(e) => onPatch({ font_color: e.target.value.toUpperCase() })}
+                className="absolute inset-0 w-full h-full p-0 border-0 cursor-pointer scale-150 bg-transparent"
+              />
+            </div>
+            <span className="font-mono text-[10px] font-medium opacity-65 tracking-wider">
               {(sticky.font_color ?? autoFg(sticky.bg_color)).toUpperCase()}
               {fontColorAuto && <span className="ml-1 opacity-60">（自动）</span>}
             </span>
@@ -247,17 +254,19 @@ export function SettingsPopover({ sticky, onPatch, onClose, onDelete }: Settings
         </div>
 
         {/* 重置 + 删除 */}
-        <div className="pt-2 border-t border-black/5 space-y-1.5">
+        <div className="pt-3 border-t border-black/5 space-y-2">
           <button
-            className="w-full h-7 rounded border border-black/10 hover:bg-black/5 text-xs"
+            className="w-full h-8 rounded-lg border border-black/10 hover:bg-black/5 text-xs font-medium flex items-center justify-center gap-1 transition active:scale-[0.98]"
             onClick={reset}
           >
+            <RotateCcw size={12} />
             重置默认
           </button>
           <button
-            className="w-full h-7 rounded border border-red-300 text-red-600 hover:bg-red-50 text-xs"
+            className="w-full h-8 rounded-lg bg-red-500/10 text-red-600 hover:bg-red-500 hover:text-white text-xs font-medium flex items-center justify-center gap-1 transition active:scale-[0.98]"
             onClick={onDelete}
           >
+            <Trash2 size={12} />
             删除便签...
           </button>
         </div>
