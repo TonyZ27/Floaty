@@ -89,6 +89,18 @@ export function SettingsPopover({ sticky, onPatch, onClose, onDelete }: Settings
       </div>
 
       <div className="p-3 space-y-3 text-xs overflow-y-auto">
+        {/* 便签标题 */}
+        <div>
+          <div className="text-[10px] uppercase tracking-wider opacity-60 mb-1.5">便签标题</div>
+          <input
+            type="text"
+            placeholder="未命名 (自动从第一行提取)"
+            value={sticky.title}
+            onChange={(e) => onPatch({ title: e.target.value })}
+            className="w-full h-8 rounded border border-black/10 px-2 outline-none text-xs focus:border-black/30 bg-transparent"
+          />
+        </div>
+
         {/* 主题 — 一键切整套配色 */}
         <div>
           <div className="text-[10px] uppercase tracking-wider opacity-60 mb-1.5">主题</div>
