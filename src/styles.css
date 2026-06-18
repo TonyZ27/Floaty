@@ -32,9 +32,10 @@ ul[data-type="taskList"] li {
 }
 ul[data-type="taskList"] li > label {
   user-select: none;
-  align-self: center;
+  align-self: flex-start;
   display: inline-flex;
   align-items: center;
+  margin-top: 0.25em;
 }
 ul[data-type="taskList"] li > label > input[type="checkbox"] {
   margin: 0;

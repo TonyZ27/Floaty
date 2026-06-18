@@ -123,6 +123,20 @@ describe("markdown extended blocks", () => {
     expect(doc.content?.[0].type).toBe("taskList");
     expect(doc.content?.[1].type).toBe("bulletList");
   });
+
+  it("round-trips nested bullet lists", () => {
+    const md = "- parent\n  - child\n    - grandchild";
+    const doc = markdownToDoc(md);
+    expect(doc.content?.[0].type).toBe("bulletList");
+    expect(docToMarkdown(doc)).toBe(md);
+  });
+
+  it("round-trips nested task lists", () => {
+    const md = "- [ ] parent\n  - [ ] child\n    - [x] grandchild";
+    const doc = markdownToDoc(md);
+    expect(doc.content?.[0].type).toBe("taskList");
+    expect(docToMarkdown(doc)).toBe(md);
+  });
 });
 
 describe("extractDues", () => {

@@ -16,6 +16,19 @@ import { DueTime, refreshAllPills } from "./DueTime";
 import { DueTimePicker } from "./DueTimePicker";
 import { parseTimeHint, type TimeHint } from "./timeHints";
 import { tierLabel, tierOf } from "../theme/urgency";
+import {
+  Bold,
+  Italic,
+  Strikethrough,
+  Code,
+  Heading1,
+  Heading2,
+  Link as LinkIcon,
+  Quote,
+  ListTodo,
+  List,
+  ListOrdered,
+} from "lucide-react";
 
 /**
  * 键入 `)` 时，往前扫描看是否刚好构成 `[text](url)`；是则替换为 link mark。
@@ -107,7 +120,7 @@ export function Editor({ initialMarkdown, onChange }: EditorProps) {
     extensions: [
       StarterKit.configure({ heading: { levels: [1, 2, 3] } }),
       TaskList,
-      TaskItem.configure({ nested: false }),
+      TaskItem.configure({ nested: true }),
       Link.configure({ openOnClick: false }),
       MarkdownLinkShortcut,
       DueTime.configure({
@@ -140,6 +153,46 @@ export function Editor({ initialMarkdown, onChange }: EditorProps) {
           const g = ghostRef.current;
           acceptGhost(g);
           event.preventDefault();
+          return true;
+        }
+        // Tab / Shift-Tab 列表与文本缩进
+        if (event.key === "Tab" && !ghostRef.current && !pickerRef.current) {
+          event.preventDefault();
+          const { state } = view;
+          if (editor.isActive("bulletList") || editor.isActive("orderedList")) {
+            if (event.shiftKey) {
+              editor.commands.liftListItem("listItem");
+            } else {
+              editor.commands.sinkListItem("listItem");
+            }
+          } else if (editor.isActive("taskList")) {
+            if (event.shiftKey) {
+              editor.commands.liftListItem("taskItem");
+            } else {
+              editor.commands.sinkListItem("taskItem");
+            }
+          } else {
+            if (event.shiftKey) {
+              // 减少缩进: 从当前行首删除最多 2 个空格或 1 个 tab
+              const { $from } = state.selection;
+              const text = $from.parent.textContent;
+              let indentLength = 0;
+              if (text.startsWith("\t")) {
+                indentLength = 1;
+              } else if (text.startsWith("  ")) {
+                indentLength = 2;
+              } else if (text.startsWith(" ")) {
+                indentLength = 1;
+              }
+              if (indentLength > 0) {
+                const start = $from.start();
+                editor.chain().focus().deleteRange({ from: start, to: start + indentLength }).run();
+              }
+            } else {
+              // 增加缩进: 插入 2 个空格
+              editor.chain().focus().insertContent("  ").run();
+            }
+          }
           return true;
         }
         if (event.key === "Escape") {
@@ -289,31 +342,31 @@ export function Editor({ initialMarkdown, onChange }: EditorProps) {
               onClick={() => editor.chain().focus().toggleTaskList().run()}
               title="待办清单"
             >
-              ☐ 待办
+              <ListTodo size={14} />
             </FmtBtn>
             <FmtBtn
               onClick={() => editor.chain().focus().toggleBulletList().run()}
               title="无序列表"
             >
-              • 列表
+              <List size={14} />
             </FmtBtn>
             <FmtBtn
               onClick={() => editor.chain().focus().toggleOrderedList().run()}
               title="有序列表"
             >
-              1. 有序
+              <ListOrdered size={14} />
             </FmtBtn>
             <FmtBtn
               onClick={() => editor.chain().focus().toggleHeading({ level: 1 }).run()}
               title="一级标题"
             >
-              H1
+              <Heading1 size={14} />
             </FmtBtn>
             <FmtBtn
               onClick={() => editor.chain().focus().toggleBlockquote().run()}
               title="引用"
             >
-              ❝
+              <Quote size={14} />
             </FmtBtn>
           </div>
         </FloatingMenu>
@@ -334,28 +387,28 @@ export function Editor({ initialMarkdown, onChange }: EditorProps) {
               onClick={() => editor.chain().focus().toggleBold().run()}
               title="粗体 ⌘B"
             >
-              <strong>B</strong>
+              <Bold size={14} />
             </FmtBtn>
             <FmtBtn
               active={editor.isActive("italic")}
               onClick={() => editor.chain().focus().toggleItalic().run()}
               title="斜体 ⌘I"
             >
-              <em>I</em>
+              <Italic size={14} />
             </FmtBtn>
             <FmtBtn
               active={editor.isActive("strike")}
               onClick={() => editor.chain().focus().toggleStrike().run()}
               title="删除线 ⌘⇧X"
             >
-              <s>S</s>
+              <Strikethrough size={14} />
             </FmtBtn>
             <FmtBtn
               active={editor.isActive("code")}
               onClick={() => editor.chain().focus().toggleCode().run()}
               title="行内代码"
             >
-              <code style={{ fontSize: "11px" }}>{"<>"}</code>
+              <Code size={14} />
             </FmtBtn>
             <div className="w-px h-4 bg-black/10 mx-0.5" />
             <FmtBtn
@@ -363,14 +416,14 @@ export function Editor({ initialMarkdown, onChange }: EditorProps) {
               onClick={() => editor.chain().focus().toggleHeading({ level: 1 }).run()}
               title="一级标题"
             >
-              H1
+              <Heading1 size={14} />
             </FmtBtn>
             <FmtBtn
               active={editor.isActive("heading", { level: 2 })}
               onClick={() => editor.chain().focus().toggleHeading({ level: 2 }).run()}
               title="二级标题"
             >
-              H2
+              <Heading2 size={14} />
             </FmtBtn>
             <FmtBtn
               onClick={() => {
@@ -380,7 +433,29 @@ export function Editor({ initialMarkdown, onChange }: EditorProps) {
               }}
               title="添加链接"
             >
-              🔗
+              <LinkIcon size={14} />
+            </FmtBtn>
+            <div className="w-px h-4 bg-black/10 mx-0.5" />
+            <FmtBtn
+              active={editor.isActive("taskList")}
+              onClick={() => editor.chain().focus().toggleTaskList().run()}
+              title="待办清单"
+            >
+              <ListTodo size={14} />
+            </FmtBtn>
+            <FmtBtn
+              active={editor.isActive("bulletList")}
+              onClick={() => editor.chain().focus().toggleBulletList().run()}
+              title="无序列表"
+            >
+              <List size={14} />
+            </FmtBtn>
+            <FmtBtn
+              active={editor.isActive("orderedList")}
+              onClick={() => editor.chain().focus().toggleOrderedList().run()}
+              title="有序列表"
+            >
+              <ListOrdered size={14} />
             </FmtBtn>
           </div>
         </BubbleMenu>
@@ -413,7 +488,7 @@ function FmtBtn({
     <button
       type="button"
       title={title}
-      className={`min-w-[24px] h-6 px-1.5 rounded text-[11px] font-medium transition-colors ${
+      className={`flex items-center justify-center min-w-[24px] h-6 px-1 rounded text-[11px] font-medium transition-colors ${
         active ? "bg-black text-white" : "text-black/70 hover:bg-black/5 active:bg-black/10"
       }`}
       // 只 preventDefault，防止编辑器失焦丢失选区

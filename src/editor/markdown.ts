@@ -56,13 +56,29 @@ function serializeBlock(node: ProseNode): string {
 
 function serializeTaskItem(node: ProseNode): string {
   const checked = node.attrs?.checked ? "x" : " ";
-  const inner = (node.content ?? []).map(serializeBlock).join(" ");
+  const inner = (node.content ?? [])
+    .map(child => {
+      const blockStr = serializeBlock(child);
+      if (child.type === "bulletList" || child.type === "orderedList" || child.type === "taskList" || child.type === "blockquote") {
+        return blockStr.split("\n").map(line => "  " + line).join("\n");
+      }
+      return blockStr;
+    })
+    .join("\n");
   return `- [${checked}] ${inner}`;
 }
 
 function serializeListItemInner(li: ProseNode): string {
   // A listItem wraps one or more paragraph/block nodes; join their inline text.
-  return (li.content ?? []).map(serializeBlock).join("\n  ");
+  return (li.content ?? [])
+    .map(child => {
+      const blockStr = serializeBlock(child);
+      if (child.type === "bulletList" || child.type === "orderedList" || child.type === "taskList" || child.type === "blockquote") {
+        return blockStr.split("\n").map(line => "  " + line).join("\n");
+      }
+      return blockStr;
+    })
+    .join("\n");
 }
 
 function serializeInline(nodes: ProseNode[]): string {
@@ -140,6 +156,92 @@ export function extractDues(md: string): DueEntry[] {
   return entries;
 }
 
+function getListLineInfo(line: string) {
+  const taskM = line.match(/^(\s*)- \[( |x)\] (.*)$/);
+  if (taskM) {
+    return {
+      indent: taskM[1].length,
+      listType: "taskList" as const,
+      itemType: "taskItem",
+      itemAttrs: { checked: taskM[2] === "x" },
+      text: taskM[3],
+    };
+  }
+  const bulletM = line.match(/^(\s*)[-*]\s(?!\[[ x]\]\s)(.*)$/);
+  if (bulletM) {
+    return {
+      indent: bulletM[1].length,
+      listType: "bulletList" as const,
+      itemType: "listItem",
+      text: bulletM[2],
+    };
+  }
+  const orderedM = line.match(/^(\s*)\d+\.\s(.*)$/);
+  if (orderedM) {
+    return {
+      indent: orderedM[1].length,
+      listType: "orderedList" as const,
+      itemType: "listItem",
+      text: orderedM[2],
+    };
+  }
+  return null;
+}
+
+interface ListLine {
+  indent: number;
+  listType: "taskList" | "bulletList" | "orderedList";
+  itemType: string;
+  itemAttrs?: any;
+  text: string;
+}
+
+function buildListTree(items: ListLine[], startIdx: number, baseIndent: number): { nodes: ProseNode[]; nextIdx: number } {
+  const nodes: ProseNode[] = [];
+  let idx = startIdx;
+
+  while (idx < items.length) {
+    const item = items[idx];
+    if (item.indent < baseIndent) {
+      break;
+    }
+
+    if (item.indent > baseIndent) {
+      if (nodes.length > 0) {
+        const lastListNode = nodes[nodes.length - 1];
+        const lastItemNode = lastListNode.content ? lastListNode.content[lastListNode.content.length - 1] : null;
+        if (lastItemNode) {
+          const { nodes: nestedLists, nextIdx } = buildListTree(items, idx, item.indent);
+          lastItemNode.content = [...(lastItemNode.content ?? []), ...nestedLists];
+          idx = nextIdx;
+          continue;
+        }
+      }
+      baseIndent = item.indent;
+    }
+
+    const currentListType = item.listType;
+    let listNode = nodes.find(n => n.type === currentListType);
+    if (!listNode) {
+      listNode = { type: currentListType, content: [] };
+      nodes.push(listNode);
+    }
+
+    const itemNode: ProseNode = {
+      type: item.itemType,
+      content: [{ type: "paragraph", content: parseInline(item.text) }],
+    };
+    if (item.itemAttrs) {
+      itemNode.attrs = item.itemAttrs;
+    }
+    listNode.content!.push(itemNode);
+
+    idx++;
+  }
+
+  return { nodes, nextIdx: idx };
+}
+
 export function markdownToDoc(md: string): ProseDoc {
   const lines = md.split("\n");
   const blocks: ProseNode[] = [];
@@ -198,54 +300,18 @@ export function markdownToDoc(md: string): ProseDoc {
       continue;
     }
 
-    // --- Task list (- [ ] / - [x]) ---
-    if (/^- \[( |x)\] /.test(line)) {
-      const tasks: ProseNode[] = [];
+    // --- Indent-aware list parsing ---
+    const listInfo = getListLineInfo(line);
+    if (listInfo) {
+      const listLines: ListLine[] = [];
       while (i < lines.length) {
-        const t = lines[i].match(/^- \[( |x)\] (.*)$/);
-        if (!t) break;
-        tasks.push({
-          type: "taskItem",
-          attrs: { checked: t[1] === "x" },
-          content: [{ type: "paragraph", content: parseInline(t[2]) }],
-        });
+        const info = getListLineInfo(lines[i]);
+        if (!info) break;
+        listLines.push(info);
         i++;
       }
-      blocks.push({ type: "taskList", content: tasks });
-      continue;
-    }
-
-    // --- Ordered list (1. / 2. ...) ---
-    if (/^\d+\.\s/.test(line)) {
-      const items: ProseNode[] = [];
-      while (i < lines.length && /^\d+\.\s/.test(lines[i])) {
-        const text = lines[i].replace(/^\d+\.\s/, "");
-        items.push({
-          type: "listItem",
-          content: [{ type: "paragraph", content: parseInline(text) }],
-        });
-        i++;
-      }
-      blocks.push({ type: "orderedList", content: items });
-      continue;
-    }
-
-    // --- Bullet list (- / * but NOT task) ---
-    if (/^[-*]\s(?!\[[ x]\]\s)/.test(line)) {
-      const items: ProseNode[] = [];
-      while (
-        i < lines.length &&
-        /^[-*]\s/.test(lines[i]) &&
-        !/^- \[( |x)\] /.test(lines[i])
-      ) {
-        const text = lines[i].replace(/^[-*]\s/, "");
-        items.push({
-          type: "listItem",
-          content: [{ type: "paragraph", content: parseInline(text) }],
-        });
-        i++;
-      }
-      blocks.push({ type: "bulletList", content: items });
+      const { nodes } = buildListTree(listLines, 0, listLines[0].indent);
+      blocks.push(...nodes);
       continue;
     }
 
