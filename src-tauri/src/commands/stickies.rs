@@ -42,7 +42,25 @@ pub async fn update_sticky(
     id: String,
     patch: StickyPatch,
 ) -> AppResult<Sticky> {
-    let s = db::stickies::update(&db, &id, patch).await?;
+    let old_sticky = db::stickies::get(&db, &id).await?;
+    let s = db::stickies::update(&db, &id, patch.clone()).await?;
+    
+    if let Some(collapsed) = patch.collapsed {
+        if collapsed != old_sticky.collapsed {
+            if let Some(w) = app.get_webview_window(&crate::windows::label(&id)) {
+                if collapsed == 1 {
+                    let _ = w.set_min_size(Some(tauri::LogicalSize::new(200.0, 36.0)));
+                    let _ = w.set_max_size(Some(tauri::LogicalSize::new(1600.0, 36.0)));
+                    let _ = w.set_size(tauri::LogicalSize::new(s.collapsed_w as f64, 36.0));
+                } else {
+                    let _ = w.set_min_size(Some(tauri::LogicalSize::new(200.0, 200.0)));
+                    let _ = w.set_max_size(Some(tauri::LogicalSize::new(1600.0, 1600.0)));
+                    let _ = w.set_size(tauri::LogicalSize::new(s.w as f64, s.h as f64));
+                }
+            }
+        }
+    }
+    
     crate::tray::refresh_menu(&app).await;
     Ok(s)
 }

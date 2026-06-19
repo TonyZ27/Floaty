@@ -5,7 +5,7 @@ import { SettingsPopover } from "./SettingsPopover";
 import { ipc } from "../ipc/client";
 import { autoFg } from "../theme/contrast";
 import type { StickyPatch } from "../ipc/types";
-import { FileText, Pin, Settings, X } from "lucide-react";
+import { FileText, Pin, Settings, X, ChevronDown, ChevronUp } from "lucide-react";
 
 interface StickyPageProps {
   stickyId: string;
@@ -60,6 +60,20 @@ export function StickyPage({ stickyId }: StickyPageProps) {
         setConfirmDelete(true);
         return;
       }
+      if (e.key === "\\") {
+        e.preventDefault();
+        (async () => {
+          try {
+            const current = await ipc.getSticky(stickyId);
+            const nextCollapsed = current.collapsed === 1 ? 0 : 1;
+            const fresh = await ipc.updateSticky(stickyId, { collapsed: nextCollapsed });
+            setSticky(fresh);
+          } catch (err) {
+            console.error("[floaty] ⌘\\:", err);
+          }
+        })();
+        return;
+      }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
@@ -109,6 +123,27 @@ export function StickyPage({ stickyId }: StickyPageProps) {
     }
   };
 
+  const onToggleCollapse = async (e?: React.MouseEvent) => {
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    if (!sticky) return;
+    if (sticky.collapsed === 0) {
+      setSettingsOpen(false);
+    }
+    try {
+      await onPatch({ collapsed: sticky.collapsed === 1 ? 0 : 1 });
+    } catch (err) {
+      console.error("[floaty] toggleCollapse failed:", err);
+    }
+  };
+
+  const onHeaderDoubleClick = (e: React.MouseEvent) => {
+    e.preventDefault();
+    onToggleCollapse();
+  };
+
   const startEditing = (e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
@@ -155,8 +190,11 @@ export function StickyPage({ stickyId }: StickyPageProps) {
     >
       <div
         data-tauri-drag-region
-        className="flex items-center justify-between px-3 py-2 text-xs border-b border-black/5 select-none cursor-grab active:cursor-grabbing"
+        className={`flex items-center justify-between px-3 py-2 text-xs select-none cursor-grab active:cursor-grabbing ${
+          sticky.collapsed === 1 ? "" : "border-b border-black/5"
+        }`}
         style={{ color: autoFg(sticky.bg_color) }}
+        onDoubleClick={onHeaderDoubleClick}
       >
         <div data-tauri-drag-region className="flex items-center gap-1.5 opacity-80 flex-1 min-w-0 mr-2">
           <FileText size={13} className="opacity-70 pointer-events-none select-none" />
@@ -179,7 +217,10 @@ export function StickyPage({ stickyId }: StickyPageProps) {
           ) : (
             <span
               className="cursor-pointer hover:bg-black/5 px-1.5 py-0.5 rounded font-semibold truncate max-w-[130px] select-none transition-colors duration-150"
-              onDoubleClick={startEditing}
+              onDoubleClick={(e) => {
+                e.stopPropagation();
+                startEditing(e);
+              }}
               title="双击重命名"
               style={{ pointerEvents: "auto" } as React.CSSProperties}
             >
@@ -196,7 +237,21 @@ export function StickyPage({ stickyId }: StickyPageProps) {
           className="flex items-center gap-1"
           style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
           onMouseDown={(e) => e.stopPropagation()}
+          onDoubleClick={(e) => e.stopPropagation()}
         >
+          <button
+            type="button"
+            className="w-6 h-6 flex items-center justify-center rounded-md opacity-45 hover:opacity-90 hover:bg-black/5 transition-all duration-150 active:scale-[0.92]"
+            onClick={onToggleCollapse}
+            title={sticky.collapsed === 1 ? "展开便签" : "折叠便签"}
+            style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
+          >
+            {sticky.collapsed === 1 ? (
+              <ChevronDown size={13} strokeWidth={2.2} />
+            ) : (
+              <ChevronUp size={13} strokeWidth={2.2} />
+            )}
+          </button>
           <button
             type="button"
             className={`w-6 h-6 flex items-center justify-center rounded-md transition-all duration-150 active:scale-[0.92] ${
@@ -210,19 +265,21 @@ export function StickyPage({ stickyId }: StickyPageProps) {
           >
             <Pin size={13} strokeWidth={2.2} className={pinned ? "rotate-45" : ""} />
           </button>
-          <button
-            type="button"
-            className={`w-6 h-6 flex items-center justify-center rounded-md transition-all duration-150 active:scale-[0.92] ${
-              settingsOpen
-                ? "bg-black/10 opacity-95"
-                : "opacity-45 hover:opacity-90 hover:bg-black/5"
-            }`}
-            onClick={toggleSettings}
-            title="外观设置"
-            style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
-          >
-            <Settings size={13} strokeWidth={2.2} />
-          </button>
+          {sticky.collapsed === 0 && (
+            <button
+              type="button"
+              className={`w-6 h-6 flex items-center justify-center rounded-md transition-all duration-150 active:scale-[0.92] ${
+                settingsOpen
+                  ? "bg-black/10 opacity-95"
+                  : "opacity-45 hover:opacity-90 hover:bg-black/5"
+              }`}
+              onClick={toggleSettings}
+              title="外观设置"
+              style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
+            >
+              <Settings size={13} strokeWidth={2.2} />
+            </button>
+          )}
           <button
             type="button"
             className="w-6 h-6 flex items-center justify-center rounded-md opacity-45 hover:opacity-90 hover:bg-black/5 hover:text-red-500 transition-all duration-150 active:scale-[0.92]"
@@ -234,12 +291,14 @@ export function StickyPage({ stickyId }: StickyPageProps) {
           </button>
         </div>
       </div>
-      <div
-        className="flex-1 overflow-auto p-3"
-        style={{ color: fg, fontSize: `${sticky.font_size}px` }}
-      >
-        <Editor initialMarkdown={markdown} onChange={save} />
-      </div>
+      {sticky.collapsed === 0 && (
+        <div
+          className="flex-1 overflow-auto p-3"
+          style={{ color: fg, fontSize: `${sticky.font_size}px` }}
+        >
+          <Editor initialMarkdown={markdown} onChange={save} />
+        </div>
+      )}
       {settingsOpen && (
         <SettingsPopover
           sticky={sticky}

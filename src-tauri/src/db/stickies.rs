@@ -18,6 +18,8 @@ pub struct Sticky {
     pub font_color: Option<String>,
     pub z_order: i64,
     pub hidden: i64,
+    pub collapsed: i64,
+    pub collapsed_w: i64,
     pub created_at: i64,
     pub updated_at: i64,
     pub deleted_at: Option<i64>,
@@ -36,8 +38,8 @@ pub async fn create_default(db: &Db) -> AppResult<Sticky> {
     let x: i64 = 80 + step * 30;
     let y: i64 = 80 + step * 30;
     sqlx::query(
-        "INSERT INTO stickies (id, title, x, y, w, h, pinned, bg_color, opacity, font_size, z_order, hidden, created_at, updated_at)
-         VALUES (?, '', ?, ?, 320, 420, 0, '#FFDC96', 0.85, 14, 0, 0, ?, ?)",
+        "INSERT INTO stickies (id, title, x, y, w, h, pinned, bg_color, opacity, font_size, z_order, hidden, collapsed, collapsed_w, created_at, updated_at)
+         VALUES (?, '', ?, ?, 320, 420, 0, '#FFDC96', 0.85, 14, 0, 0, 0, 200, ?, ?)",
     )
     .bind(&id)
     .bind(x)
@@ -81,6 +83,8 @@ pub struct StickyPatch {
     pub font_color: Option<String>,
     pub z_order: Option<i64>,
     pub hidden: Option<i64>,
+    pub collapsed: Option<i64>,
+    pub collapsed_w: Option<i64>,
 }
 
 /// 所有**活跃**便签（hidden 可以是 0 或 1）；回收站里的不返回。
@@ -119,6 +123,8 @@ pub async fn update(db: &Db, id: &str, patch: StickyPatch) -> AppResult<Sticky> 
             font_color = COALESCE(?, font_color),
             z_order = COALESCE(?, z_order),
             hidden = COALESCE(?, hidden),
+            collapsed = COALESCE(?, collapsed),
+            collapsed_w = COALESCE(?, collapsed_w),
             updated_at = ?
          WHERE id = ?",
     )
@@ -134,6 +140,8 @@ pub async fn update(db: &Db, id: &str, patch: StickyPatch) -> AppResult<Sticky> 
     .bind(patch.font_color)
     .bind(patch.z_order)
     .bind(patch.hidden)
+    .bind(patch.collapsed)
+    .bind(patch.collapsed_w)
     .bind(now)
     .bind(id)
     .execute(db)

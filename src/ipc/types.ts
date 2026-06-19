@@ -12,6 +12,8 @@ export interface Sticky {
   font_color: string | null;
   z_order: number;
   hidden: number;
+  collapsed: number;
+  collapsed_w: number;
   created_at: number;
   updated_at: number;
   deleted_at: number | null;
@@ -49,4 +51,6 @@ export interface StickyPatch {
   font_color?: string;
   z_order?: number;
   hidden?: number;
+  collapsed?: number;
+  collapsed_w?: number;
 }

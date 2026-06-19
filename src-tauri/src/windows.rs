@@ -27,14 +27,28 @@ pub async fn open(app: &AppHandle, sticky: &Sticky) -> AppResult<WebviewWindow> 
     let url = format!("index.html#/sticky/{}", sticky.id);
     // 防御式 clamp：如果过去因 bug 存了异常大的"逻辑尺寸"，重置为默认
     let (w, h) = sanitize_size(sticky.w, sticky.h);
+    let is_collapsed = sticky.collapsed == 1;
+    let final_w = if is_collapsed { (sticky.collapsed_w).max(200).min(1600) as f64 } else { w as f64 };
+    let final_h = if is_collapsed { 36.0 } else { h as f64 };
+
     let mut builder = WebviewWindowBuilder::new(app, &lbl, WebviewUrl::App(url.into()))
         .title("Floaty")
-        .inner_size(w as f64, h as f64)
+        .inner_size(final_w, final_h)
         .resizable(true)
         .decorations(false)
         .transparent(true)
         .always_on_top(sticky.pinned == 1)
         .visible(true);
+
+    if is_collapsed {
+        builder = builder
+            .min_inner_size(200.0, 36.0)
+            .max_inner_size(1600.0, 36.0);
+    } else {
+        builder = builder
+            .min_inner_size(200.0, 200.0)
+            .max_inner_size(1600.0, 1600.0);
+    }
 
     if let (Some(x), Some(y)) = (sticky.x, sticky.y) {
         if let Some((sx, sy)) = sanitize_position(x, y) {
@@ -151,23 +165,34 @@ pub async fn tile_all(app: &AppHandle, db: &Db) -> AppResult<usize> {
         let row = (i / cols) as i64;
         let x = start_x + col * cell_w;
         let y = start_y + row * cell_h;
-        // 1) 写回 DB
-        db::stickies::update(
-            db,
-            &s.id,
+        
+        let is_collapsed = s.collapsed == 1;
+        let patch = if is_collapsed {
+            db::stickies::StickyPatch {
+                x: Some(x),
+                y: Some(y),
+                collapsed_w: Some(320),
+                ..Default::default()
+            }
+        } else {
             db::stickies::StickyPatch {
                 x: Some(x),
                 y: Some(y),
                 w: Some(320),
                 h: Some(420),
                 ..Default::default()
-            },
-        )
-        .await?;
+            }
+        };
+        // 1) 写回 DB
+        db::stickies::update(db, &s.id, patch).await?;
+
+        let target_w = 320.0;
+        let target_h = if is_collapsed { 36.0 } else { 420.0 };
+
         // 2) 立即应用到运行中的窗口
         if let Some(w) = app.get_webview_window(&label(&s.id)) {
             let _ = w.set_position(tauri::LogicalPosition::new(x as f64, y as f64));
-            let _ = w.set_size(tauri::LogicalSize::new(320.0, 420.0));
+            let _ = w.set_size(tauri::LogicalSize::new(target_w, target_h));
             let _ = w.show();
             let _ = w.set_focus();
         } else {
@@ -455,8 +480,8 @@ fn attach_geometry_listener(window: &WebviewWindow, sticky_id: String) -> AppRes
         if sanitize_position(x, y).is_none() {
             return;
         }
-        // 再加一层保护：极小尺寸（< 100）几乎肯定是建窗时的过渡值，不写回
-        if w < 100 || h < 100 {
+        // 再加一层保护：极小尺寸几乎肯定是建窗时的过渡值，不写回
+        if w < 100 || h < 20 {
             return;
         }
         let my_seq = seq.fetch_add(1, Ordering::SeqCst) + 1;
@@ -470,18 +495,25 @@ fn attach_geometry_listener(window: &WebviewWindow, sticky_id: String) -> AppRes
                 return;
             }
             if let Some(db) = app.try_state::<Db>() {
-                let _ = db::stickies::update(
-                    &db,
-                    &sticky_id,
-                    db::stickies::StickyPatch {
-                        x: Some(x),
-                        y: Some(y),
-                        w: Some(w),
-                        h: Some(h),
-                        ..Default::default()
-                    },
-                )
-                .await;
+                if let Ok(sticky) = db::stickies::get(&db, &sticky_id).await {
+                    let patch = if sticky.collapsed == 1 {
+                        db::stickies::StickyPatch {
+                            x: Some(x),
+                            y: Some(y),
+                            collapsed_w: Some(w),
+                            ..Default::default()
+                        }
+                    } else {
+                        db::stickies::StickyPatch {
+                            x: Some(x),
+                            y: Some(y),
+                            w: Some(w),
+                            h: Some(h),
+                            ..Default::default()
+                        }
+                    };
+                    let _ = db::stickies::update(&db, &sticky_id, patch).await;
+                }
             }
         });
     });
