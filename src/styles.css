@@ -237,14 +237,27 @@ ul[data-type="taskList"] li[data-checked="true"] > div {
 
 /* 无序/有序列表 */
 .ProseMirror ul:not([data-type="taskList"]) {
-  list-style: disc;
+  list-style-type: disc;
   padding-left: 1.2em;
   margin: 0.3em 0;
 }
+.ProseMirror ul:not([data-type="taskList"]) ul:not([data-type="taskList"]) {
+  list-style-type: circle;
+}
+.ProseMirror ul:not([data-type="taskList"]) ul:not([data-type="taskList"]) ul:not([data-type="taskList"]) {
+  list-style-type: square;
+}
+
 .ProseMirror ol {
-  list-style: decimal;
+  list-style-type: decimal;
   padding-left: 1.2em;
   margin: 0.3em 0;
+}
+.ProseMirror ol ol {
+  list-style-type: lower-alpha;
+}
+.ProseMirror ol ol ol {
+  list-style-type: lower-roman;
 }
 .ProseMirror li p {
   margin: 0;
