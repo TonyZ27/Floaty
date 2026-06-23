@@ -163,13 +163,19 @@ export function Editor({ initialMarkdown, onChange }: EditorProps) {
             if (event.shiftKey) {
               editor.commands.liftListItem("listItem");
             } else {
-              editor.commands.sinkListItem("listItem");
+              const success = editor.commands.sinkListItem("listItem");
+              if (!success) {
+                wrapCurrentList(editor, "listItem");
+              }
             }
           } else if (editor.isActive("taskList")) {
             if (event.shiftKey) {
               editor.commands.liftListItem("taskItem");
             } else {
-              editor.commands.sinkListItem("taskItem");
+              const success = editor.commands.sinkListItem("taskItem");
+              if (!success) {
+                wrapCurrentList(editor, "taskItem");
+              }
             }
           } else {
             if (event.shiftKey) {
@@ -194,6 +200,33 @@ export function Editor({ initialMarkdown, onChange }: EditorProps) {
             }
           }
           return true;
+        }
+        // Enter 键空列表项提升与中断
+        if (event.key === "Enter" && !event.shiftKey) {
+          const { state } = view;
+          const { selection } = state;
+          const { $from, empty } = selection;
+          if (empty) {
+            const depth = $from.depth;
+            if (depth >= 2) {
+              const paragraphNode = $from.node(depth);
+              const parentNode = $from.node(depth - 1);
+              if (
+                paragraphNode.type.name === "paragraph" &&
+                (parentNode.type.name === "listItem" || parentNode.type.name === "taskItem")
+              ) {
+                if (paragraphNode.textContent.trim() === "") {
+                  event.preventDefault();
+                  if (parentNode.type.name === "listItem") {
+                    editor.commands.liftListItem("listItem");
+                  } else {
+                    editor.commands.liftListItem("taskItem");
+                  }
+                  return true;
+                }
+              }
+            }
+          }
         }
         if (event.key === "Escape") {
           if (pickerRef.current) {
@@ -545,4 +578,40 @@ function clampToViewport<T extends { x: number; y: number }>(p: T): T {
   const x = Math.max(8, Math.min(p.x, vw - PICKER_W - 8));
   const y = p.y + PICKER_H > vh - 8 ? Math.max(8, p.y - PICKER_H - 24) : p.y;
   return { ...p, x, y } as T;
+}
+
+function wrapCurrentList(editor: any, itemTypeName: string) {
+  const { state, view } = editor;
+  const { tr, selection } = state;
+  const { $from } = selection;
+
+  let listDepth = -1;
+  for (let d = $from.depth; d > 0; d--) {
+    const node = $from.node(d);
+    if (node.type.name === "bulletList" || node.type.name === "orderedList" || node.type.name === "taskList") {
+      listDepth = d;
+      break;
+    }
+  }
+
+  if (listDepth > -1) {
+    const listNode = $from.node(listDepth);
+    const listPos = $from.before(listDepth);
+    const listType = listNode.type;
+    const itemType = state.schema.nodes[itemTypeName];
+
+    if (itemType && listType) {
+      const range = state.doc.resolve(listPos).blockRange(state.doc.resolve(listPos + listNode.nodeSize));
+      if (range) {
+        const wrapping = [
+          { type: listType },
+          { type: itemType }
+        ];
+        const wrapTr = tr.wrap(range, wrapping);
+        if (wrapTr) {
+          view.dispatch(wrapTr);
+        }
+      }
+    }
+  }
 }
