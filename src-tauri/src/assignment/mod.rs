@@ -16,6 +16,7 @@ pub enum RuntimeState {
     Visible,
     Suspended,
     ManuallyHidden,
+    SuspendedManuallyHidden,
     TargetClosed,
     ReconnectRequired,
     Unavailable,
