@@ -1,5 +1,6 @@
 use tauri::Manager;
 
+mod assignment;
 mod commands;
 mod db;
 mod error;

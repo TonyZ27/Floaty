@@ -3,15 +3,7 @@ use crate::error::{AppError, AppResult};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
-#[serde(rename_all = "snake_case")]
-#[sqlx(type_name = "TEXT", rename_all = "snake_case")]
-pub enum BindingState {
-    Active,
-    TargetClosed,
-    ReconnectRequired,
-    Unavailable,
-}
+pub use crate::assignment::BindingState;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, FromRow)]
 pub struct WindowBinding {
