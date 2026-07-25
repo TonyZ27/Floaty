@@ -166,10 +166,17 @@ pub async fn reveal_for_binding(
 ) -> AppResult<WebviewWindow> {
     let sticky = db::stickies::get(db, sticky_id).await?;
     if let Some(window) = app.get_webview_window(&label(sticky_id)) {
-        let (x, y) = match (sticky.x, sticky.y) {
+        let preferred = match (sticky.x, sticky.y) {
             (Some(x), Some(y)) => sanitize_position(x, y).unwrap_or((200, 200)),
             _ => (200, 200),
         };
+        let (w, h) = sanitize_size(sticky.w, sticky.h);
+        let (w, h) = if sticky.collapsed == 1 {
+            (sticky.collapsed_w.clamp(200, 1600), 36)
+        } else {
+            (w, h)
+        };
+        let (x, y) = recover_position_on_connected_monitors(app, preferred, w, h);
         window
             .set_position(tauri::LogicalPosition::new(x as f64, y as f64))
             .map_err(|error| {
@@ -490,15 +497,81 @@ fn sanitize_position(x: i64, y: i64) -> Option<(i64, i64)> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LogicalMonitorBounds {
+    x: i64,
+    y: i64,
+    w: i64,
+    h: i64,
+}
+
+fn logical_monitor_bounds(monitor: &tauri::Monitor) -> LogicalMonitorBounds {
+    let scale = monitor.scale_factor();
+    let position = monitor.position();
+    let size = monitor.size();
+    LogicalMonitorBounds {
+        x: (position.x as f64 / scale) as i64,
+        y: (position.y as f64 / scale) as i64,
+        w: (size.width as f64 / scale) as i64,
+        h: (size.height as f64 / scale) as i64,
+    }
+}
+
+fn overlaps_visible_region(
+    position: (i64, i64),
+    w: i64,
+    h: i64,
+    monitor: LogicalMonitorBounds,
+) -> bool {
+    let (x, y) = position;
+    let overlap_w = (x + w).min(monitor.x + monitor.w) - x.max(monitor.x);
+    let overlap_h = (y + h).min(monitor.y + monitor.h) - y.max(monitor.y);
+    overlap_w >= 40 && overlap_h >= 30
+}
+
+fn recover_visible_position(
+    preferred: (i64, i64),
+    w: i64,
+    h: i64,
+    monitors: &[LogicalMonitorBounds],
+    primary: Option<LogicalMonitorBounds>,
+) -> (i64, i64) {
+    if monitors.is_empty()
+        || monitors
+            .iter()
+            .copied()
+            .any(|monitor| overlaps_visible_region(preferred, w, h, monitor))
+    {
+        return preferred;
+    }
+    let recovery_monitor = primary.or_else(|| monitors.first().copied());
+    recovery_monitor
+        .map(|monitor| (monitor.x + 50, monitor.y + 50))
+        .unwrap_or(preferred)
+}
+
+fn recover_position_on_connected_monitors(
+    app: &AppHandle,
+    preferred: (i64, i64),
+    w: i64,
+    h: i64,
+) -> (i64, i64) {
+    let Ok(monitors) = app.available_monitors() else {
+        return preferred;
+    };
+    let monitors: Vec<_> = monitors.iter().map(logical_monitor_bounds).collect();
+    let primary = app
+        .primary_monitor()
+        .ok()
+        .flatten()
+        .as_ref()
+        .map(logical_monitor_bounds);
+    recover_visible_position(preferred, w, h, &monitors, primary)
+}
+
 /// 检查 (x,y,w,h) 矩形是否与任一已连接显示器的可见区域有重叠。
 /// 没有重叠（即窗口完全在所有屏幕之外）→ 返回 false，让窗口用默认位置。
 fn position_visible_on_any_monitor(app: &AppHandle, x: i64, y: i64, w: i64, h: i64) -> bool {
-    // 至少要露出 40 像素宽 + 30 像素高才算"可见"
-    let min_overlap_w = 40_i64;
-    let min_overlap_h = 30_i64;
-    let win_right = x + w;
-    let win_bottom = y + h;
-
     let monitors = match app.available_monitors() {
         Ok(m) => m,
         Err(_) => return true, // 无法取显示器信息时，保守放行
@@ -508,25 +581,10 @@ fn position_visible_on_any_monitor(app: &AppHandle, x: i64, y: i64, w: i64, h: i
     if monitors.is_empty() {
         return true;
     }
-    for mon in monitors {
-        let scale = mon.scale_factor();
-        let pos = mon.position();
-        let size = mon.size();
-        // 显示器坐标是物理像素；转换为逻辑像素（与 window.position 同单位）
-        let mx = (pos.x as f64 / scale) as i64;
-        let my = (pos.y as f64 / scale) as i64;
-        let mw = (size.width as f64 / scale) as i64;
-        let mh = (size.height as f64 / scale) as i64;
-        let mon_right = mx + mw;
-        let mon_bottom = my + mh;
-
-        let overlap_w = win_right.min(mon_right) - x.max(mx);
-        let overlap_h = win_bottom.min(mon_bottom) - y.max(my);
-        if overlap_w >= min_overlap_w && overlap_h >= min_overlap_h {
-            return true;
-        }
-    }
-    false
+    monitors
+        .iter()
+        .map(logical_monitor_bounds)
+        .any(|monitor| overlaps_visible_region((x, y), w, h, monitor))
 }
 
 /// 绑定 Move/Resize → 写回 DB。关键：Tauri 窗口 getter 返回 **物理像素**，
@@ -664,5 +722,35 @@ mod binding_policy_tests {
                 "pin is managed by the active window binding"
             );
         }
+    }
+
+    #[test]
+    fn disconnected_display_position_recovers_inside_primary_monitor() {
+        let primary = LogicalMonitorBounds {
+            x: 0,
+            y: 0,
+            w: 1440,
+            h: 900,
+        };
+
+        assert_eq!(
+            recover_visible_position((1800, 120), 320, 420, &[primary], Some(primary)),
+            (50, 50)
+        );
+    }
+
+    #[test]
+    fn connected_display_position_remains_unchanged() {
+        let primary = LogicalMonitorBounds {
+            x: 0,
+            y: 0,
+            w: 1440,
+            h: 900,
+        };
+
+        assert_eq!(
+            recover_visible_position((220, 140), 320, 420, &[primary], Some(primary)),
+            (220, 140)
+        );
     }
 }

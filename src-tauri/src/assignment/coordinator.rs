@@ -426,6 +426,7 @@ impl BindingCoordinator {
                 if current == RuntimeState::Suspended
                     && !self.inner.repository.manually_hidden(sticky_id).await?
                 {
+                    self.inner.windows.reopen(sticky_id).await?;
                     self.inner
                         .native
                         .resume(sticky_id, active_window_id(&binding)?)
@@ -1856,7 +1857,31 @@ mod tests {
             *harness.native.calls.lock().unwrap(),
             vec![NativeCall::Resume(TARGET_WINDOW_ID)]
         );
+        assert_eq!(*harness.windows.reopen_count.lock().unwrap(), 2);
+        assert_eq!(
+            harness.coordinator.runtime_state_for(STICKY_ID),
+            Some(RuntimeState::Visible)
+        );
+    }
+
+    #[tokio::test]
+    async fn target_restore_recovers_note_position_before_native_resume() {
+        let harness = Harness::active(false);
+        harness
+            .coordinator
+            .set_runtime_state(STICKY_ID, RuntimeState::Suspended);
+
+        harness
+            .coordinator
+            .handle(STICKY_ID, BindingEvent::TargetRestored)
+            .await
+            .unwrap();
+
         assert_eq!(*harness.windows.reopen_count.lock().unwrap(), 1);
+        assert_eq!(
+            *harness.native.calls.lock().unwrap(),
+            vec![NativeCall::Resume(TARGET_WINDOW_ID)]
+        );
         assert_eq!(
             harness.coordinator.runtime_state_for(STICKY_ID),
             Some(RuntimeState::Visible)
