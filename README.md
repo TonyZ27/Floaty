@@ -16,6 +16,7 @@
 ## 功能一瞥
 
 - **多便签浮动窗口**：拖动 / resize / 单独置顶 / 菜单栏常驻（纯 tray 应用）
+- **窗口绑定（仅 macOS）**：把便签挂到指定窗口实例，随其全屏 Space 显示；只读取窗口元数据，不请求屏幕录制权限或捕获窗口内容
 - **Markdown 编辑**：checkbox / 列表 / 引用 / 代码块 / 粗斜删除线 / 链接 …… 完整双向 round-trip
 - **选中文字 + 空行浮动工具栏**：不会 markdown 也能插入待办、加粗、建标题
 - **智能时间识别**：输入 `今天下午3点` / `30分钟后` / `下周一` / `4月25日` 等直接识别 → 彩色 pill + 系统通知
@@ -57,9 +58,9 @@ open /Applications/Floaty.app
 
 ## 技术栈
 
-Tauri 2 · React 18 · TypeScript · Vite · TipTap 2 · Tailwind CSS · sqlx (SQLite) · Tokio · Vitest · Rust
+Tauri 2 · React 19 · TypeScript · Vite · TipTap 3 · Tailwind CSS · sqlx (SQLite) · Tokio · Vitest · Rust
 
-**86 前端测试 + 14 后端测试** 全绿。macOS/Windows 打包走 GitHub Actions 自动构建。
+项目包含前后端自动化测试。macOS/Windows 打包走 GitHub Actions 自动构建；窗口绑定是 macOS 专属功能。
 
 ---
 
