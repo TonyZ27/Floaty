@@ -6,6 +6,7 @@ pub mod stickies;
 pub mod items;
 pub mod reminders;
 pub mod snapshots;
+pub mod window_bindings;
 
 pub type Db = SqlitePool;
 

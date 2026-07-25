@@ -149,15 +149,22 @@ pub async fn update(db: &Db, id: &str, patch: StickyPatch) -> AppResult<Sticky> 
     get(db, id).await
 }
 
-/// 软删除：设 `deleted_at = now`，不触碰 items/reminders（级联 CASCADE 在 purge 时才触发）。
+/// 软删除：设 `deleted_at = now` 并清除窗口绑定；
+/// 不触碰 items/reminders（级联 CASCADE 在 purge 时才触发）。
 pub async fn delete(db: &Db, id: &str) -> AppResult<()> {
     let now = chrono::Utc::now().timestamp_millis();
+    let mut tx = db.begin().await?;
     sqlx::query("UPDATE stickies SET deleted_at = ?, updated_at = ? WHERE id = ?")
         .bind(now)
         .bind(now)
         .bind(id)
-        .execute(db)
+        .execute(&mut *tx)
         .await?;
+    sqlx::query("DELETE FROM window_bindings WHERE sticky_id = ?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
     Ok(())
 }
 

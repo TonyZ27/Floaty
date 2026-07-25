@@ -8,6 +8,10 @@ static MIGRATIONS: &[(&str, &str)] = &[
     ("0005_fts", include_str!("../../migrations/0005_fts.sql")),
     ("0006_collapse", include_str!("../../migrations/0006_collapse.sql")),
     ("0007_collapse_w", include_str!("../../migrations/0007_collapse_w.sql")),
+    (
+        "0008_window_bindings",
+        include_str!("../../migrations/0008_window_bindings.sql"),
+    ),
 ];
 
 pub async fn run(pool: &SqlitePool) -> anyhow::Result<()> {
