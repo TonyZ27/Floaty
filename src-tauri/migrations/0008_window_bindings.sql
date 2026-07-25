@@ -1,5 +1,5 @@
 CREATE TABLE window_bindings (
-  sticky_id TEXT PRIMARY KEY REFERENCES stickies(id) ON DELETE CASCADE,
+  sticky_id TEXT NOT NULL PRIMARY KEY REFERENCES stickies(id) ON DELETE CASCADE,
   app_bundle_id TEXT NOT NULL,
   app_name TEXT NOT NULL,
   window_title TEXT NOT NULL DEFAULT '',

@@ -202,6 +202,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn binding_schema_requires_one_existing_unique_sticky() {
+        let db = test_pool().await;
+        let insert = "INSERT INTO window_bindings (
+                sticky_id, app_bundle_id, app_name, window_title, runtime_pid,
+                runtime_window_id, state, prior_pinned, created_at, updated_at
+            ) VALUES (?, 'com.example.Target', 'Target', '', 42, 101, 'active', 0, 0, 0)";
+
+        let null_owner = sqlx::query(insert)
+            .bind(Option::<String>::None)
+            .execute(&db)
+            .await;
+        assert!(null_owner.is_err());
+
+        let orphaned = sqlx::query(insert).bind("missing").execute(&db).await;
+        assert!(orphaned.is_err());
+
+        let sticky = crate::db::stickies::create_default(&db).await.unwrap();
+        sqlx::query(insert)
+            .bind(&sticky.id)
+            .execute(&db)
+            .await
+            .unwrap();
+        let duplicate = sqlx::query(insert).bind(&sticky.id).execute(&db).await;
+        assert!(duplicate.is_err());
+    }
+
+    #[tokio::test]
     async fn replacing_binding_keeps_one_row_and_original_pin() {
         let db = test_pool().await;
         let sticky = crate::db::stickies::create_default(&db).await.unwrap();
