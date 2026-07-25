@@ -39,6 +39,8 @@ export function WindowPickerPage({ stickyId }: { stickyId: string }) {
   const [selectingKey, setSelectingKey] = useState<string | null>(null);
   const requestGeneration = useRef(0);
   const selectionPending = useRef(false);
+  const mounted = useRef(false);
+  const focusIndex = useRef(0);
   const cardRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
   const loadWindows = useCallback(async () => {
@@ -56,6 +58,7 @@ export function WindowPickerPage({ stickyId }: { stickyId: string }) {
 
       const eligible = await ipc.listEligibleWindows();
       if (generation !== requestGeneration.current) return;
+      focusIndex.current = 0;
       setWindows(eligible);
       setState(eligible.length > 0 ? "ready" : "empty");
     } catch {
@@ -66,8 +69,10 @@ export function WindowPickerPage({ stickyId }: { stickyId: string }) {
   }, []);
 
   useEffect(() => {
+    mounted.current = true;
     void loadWindows();
     return () => {
+      mounted.current = false;
       requestGeneration.current += 1;
     };
   }, [loadWindows]);
@@ -76,6 +81,7 @@ export function WindowPickerPage({ stickyId }: { stickyId: string }) {
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       event.preventDefault();
+      if (selectionPending.current) return;
       void closePicker();
     };
     document.addEventListener("keydown", handleEscape);
@@ -84,7 +90,8 @@ export function WindowPickerPage({ stickyId }: { stickyId: string }) {
 
   useEffect(() => {
     if (state === "ready" && selectingKey === null) {
-      cardRefs.current[0]?.focus();
+      const index = Math.min(focusIndex.current, windows.length - 1);
+      cardRefs.current[Math.max(index, 0)]?.focus();
     }
   }, [state, windows, selectingKey]);
 
@@ -93,13 +100,16 @@ export function WindowPickerPage({ stickyId }: { stickyId: string }) {
     try {
       await ipc.openAccessibilitySettings();
     } catch {
-      setNotice("无法打开系统设置，请稍后重试。");
+      if (mounted.current) {
+        setNotice("无法打开系统设置，请稍后重试。");
+      }
     }
   };
 
-  const selectWindow = async (target: WindowDescriptor) => {
+  const selectWindow = async (target: WindowDescriptor, selectedIndex: number) => {
     if (selectionPending.current) return;
     selectionPending.current = true;
+    focusIndex.current = selectedIndex;
     let bindingSucceeded = false;
     const selectedKey = targetKey(target);
     setSelectingKey(selectedKey);
@@ -107,14 +117,19 @@ export function WindowPickerPage({ stickyId }: { stickyId: string }) {
     try {
       await ipc.bindNoteToWindow(stickyId, target);
       bindingSucceeded = true;
+      if (!mounted.current) return;
       if (!(await closePicker())) {
-        setNotice("绑定成功，请手动关闭此窗口。");
+        if (mounted.current) {
+          setNotice("绑定成功，请手动关闭此窗口。");
+        }
       }
     } catch (error) {
+      if (!mounted.current) return;
       if (isStaleTargetError(error)) {
         const remaining = windows.filter(
           (candidate) => targetKey(candidate) !== selectedKey,
         );
+        focusIndex.current = Math.min(selectedIndex, remaining.length - 1);
         setWindows(remaining);
         setState(remaining.length > 0 ? "ready" : "empty");
         setNotice("该窗口已关闭，请重新选择");
@@ -122,7 +137,7 @@ export function WindowPickerPage({ stickyId }: { stickyId: string }) {
         setNotice("绑定失败，请重试。");
       }
     } finally {
-      if (!bindingSucceeded) {
+      if (!bindingSucceeded && mounted.current) {
         selectionPending.current = false;
         setSelectingKey(null);
       }
@@ -135,23 +150,36 @@ export function WindowPickerPage({ stickyId }: { stickyId: string }) {
     target: WindowDescriptor,
   ) => {
     let nextIndex: number | null = null;
-    if (event.key === "ArrowRight") {
-      nextIndex = Math.min(index + 1, windows.length - 1);
-    } else if (event.key === "ArrowLeft") {
-      nextIndex = Math.max(index - 1, 0);
+    const column = index % GRID_COLUMNS;
+    if (
+      event.key === "ArrowRight" &&
+      column < GRID_COLUMNS - 1 &&
+      index + 1 < windows.length
+    ) {
+      nextIndex = index + 1;
+    } else if (event.key === "ArrowLeft" && column > 0) {
+      nextIndex = index - 1;
     } else if (event.key === "ArrowDown" && index + GRID_COLUMNS < windows.length) {
       nextIndex = index + GRID_COLUMNS;
     } else if (event.key === "ArrowUp" && index - GRID_COLUMNS >= 0) {
       nextIndex = index - GRID_COLUMNS;
     } else if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
-      void selectWindow(target);
+      void selectWindow(target, index);
       return;
     }
 
     if (nextIndex !== null) {
       event.preventDefault();
+      focusIndex.current = nextIndex;
       cardRefs.current[nextIndex]?.focus();
+    } else if (
+      event.key === "ArrowRight" ||
+      event.key === "ArrowLeft" ||
+      event.key === "ArrowDown" ||
+      event.key === "ArrowUp"
+    ) {
+      event.preventDefault();
     }
   };
 
@@ -265,7 +293,7 @@ export function WindowPickerPage({ stickyId }: { stickyId: string }) {
                   className="window-picker-card"
                   aria-label={`${target.appName}，${accessibleTitle}`}
                   disabled={selectingKey !== null}
-                  onClick={() => void selectWindow(target)}
+                  onClick={() => void selectWindow(target, index)}
                   onKeyDown={(event) => handleCardKeyDown(event, index, target)}
                 >
                   {target.appIconDataUrl ? (

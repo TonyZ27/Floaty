@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App, { parseWindowLabel } from "../App";
 import type { WindowDescriptor } from "../ipc/types";
@@ -141,10 +141,23 @@ describe("WindowPickerPage", () => {
 
     const first = await screen.findByRole("button", { name: "Chrome，Project Alpha" });
     const second = screen.getByRole("button", { name: "Figma，Design system" });
+    const third = screen.getByRole("button", { name: "Terminal，Shell" });
     const fifth = screen.getByRole("button", { name: "Notes，Ideas" });
     await waitFor(() => expect(first).toHaveFocus());
 
+    fireEvent.keyDown(first, { key: "ArrowLeft" });
+    expect(first).toHaveFocus();
     fireEvent.keyDown(first, { key: "ArrowRight" });
+    expect(second).toHaveFocus();
+    fireEvent.keyDown(second, { key: "ArrowRight" });
+    expect(third).toHaveFocus();
+    fireEvent.keyDown(third, { key: "ArrowRight" });
+    expect(third).toHaveFocus();
+    fireEvent.keyDown(third, { key: "ArrowLeft" });
+    expect(second).toHaveFocus();
+    fireEvent.keyDown(second, { key: "ArrowDown" });
+    expect(fifth).toHaveFocus();
+    fireEvent.keyDown(fifth, { key: "ArrowUp" });
     expect(second).toHaveFocus();
     fireEvent.keyDown(second, { key: "ArrowDown" });
     expect(fifth).toHaveFocus();
@@ -201,6 +214,48 @@ describe("WindowPickerPage", () => {
     await waitFor(() => expect(mocks.close).toHaveBeenCalledTimes(1));
   });
 
+  it("consumes Escape while a bind is pending", async () => {
+    let resolveBind: (() => void) | undefined;
+    mocks.ipc.bindNoteToWindow.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveBind = () => resolve({});
+      }),
+    );
+    render(<WindowPickerPage stickyId={STICKY_ID} />);
+    const card = await screen.findByRole("button", {
+      name: "Chrome，Project Alpha",
+    });
+
+    fireEvent.click(card);
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    expect(mocks.close).not.toHaveBeenCalled();
+    resolveBind?.();
+    await waitFor(() => expect(mocks.close).toHaveBeenCalledTimes(1));
+  });
+
+  it("does not update or close after unmounting during a pending bind", async () => {
+    let resolveBind: (() => void) | undefined;
+    mocks.ipc.bindNoteToWindow.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveBind = () => resolve({});
+      }),
+    );
+    const view = render(<WindowPickerPage stickyId={STICKY_ID} />);
+    const card = await screen.findByRole("button", {
+      name: "Chrome，Project Alpha",
+    });
+
+    fireEvent.click(card);
+    view.unmount();
+    await act(async () => {
+      resolveBind?.();
+      await Promise.resolve();
+    });
+    expect(mocks.ipc.bindNoteToWindow).toHaveBeenCalledTimes(1);
+    expect(mocks.close).not.toHaveBeenCalled();
+  });
+
   it("does not permit another bind when closing fails after success", async () => {
     mocks.close.mockRejectedValueOnce("close failed");
     render(<WindowPickerPage stickyId={STICKY_ID} />);
@@ -239,21 +294,33 @@ describe("WindowPickerPage", () => {
     expect(
       screen.getByRole("button", { name: "Figma，Design system" }),
     ).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Figma，Design system" }),
+    ).toHaveFocus();
     expect(mocks.close).not.toHaveBeenCalled();
   });
 
   it("keeps cards available after a generic binding error", async () => {
-    mocks.ipc.listEligibleWindows.mockResolvedValue([chromeWindow, figmaWindow]);
+    const windows = [
+      chromeWindow,
+      figmaWindow,
+      descriptor("Terminal", "Shell", 3),
+      descriptor("Safari", "Reference", 4),
+      descriptor("Notes", "Ideas", 5),
+    ];
+    mocks.ipc.listEligibleWindows.mockResolvedValue(windows);
     mocks.ipc.bindNoteToWindow.mockRejectedValue("native attachment failed");
     render(<WindowPickerPage stickyId={STICKY_ID} />);
     const selected = await screen.findByRole("button", {
-      name: "Chrome，Project Alpha",
+      name: "Notes，Ideas",
     });
 
+    selected.focus();
     fireEvent.click(selected);
 
     expect(await screen.findByText("绑定失败，请重试。")).toBeVisible();
     expect(selected).toBeVisible();
+    expect(selected).toHaveFocus();
     expect(
       screen.getByRole("button", { name: "Figma，Design system" }),
     ).toBeVisible();
