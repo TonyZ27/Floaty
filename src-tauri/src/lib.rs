@@ -3,6 +3,7 @@ use tauri::Manager;
 mod commands;
 mod db;
 mod error;
+mod platform;
 mod reminders;
 mod tray;
 mod windows;
