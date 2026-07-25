@@ -42,10 +42,13 @@ pub trait NativeWindowRuntime: Send + Sync {
 
 #[async_trait]
 pub trait NoteWindowRuntime: Send + Sync {
-    async fn ensure_open(&self, sticky_id: &str) -> AppResult<()>;
+    async fn ensure_open(&self, sticky_id: &str, keep_hidden: bool) -> AppResult<()>;
     async fn reopen(&self, sticky_id: &str) -> AppResult<()>;
     async fn enter_bound_mode(&self, sticky_id: &str) -> AppResult<()>;
     async fn restore_unbound_pinning(&self, sticky_id: &str) -> AppResult<()>;
+    async fn binding_removed(&self, _sticky_id: &str) -> AppResult<()> {
+        Ok(())
+    }
     async fn binding_changed(&self, _binding: &WindowBinding) -> AppResult<()> {
         Ok(())
     }
@@ -181,7 +184,13 @@ impl BindingCoordinator {
             }
         }
 
-        if let Err(error) = self.inner.windows.ensure_open(sticky_id).await {
+        let manually_hidden = self.inner.repository.manually_hidden(sticky_id).await?;
+        if let Err(error) = self
+            .inner
+            .windows
+            .ensure_open(sticky_id, manually_hidden)
+            .await
+        {
             if let Some(previous) = previous_binding.as_ref() {
                 self.restore_previous_or_degrade(sticky_id, previous)
                     .await?;
@@ -210,6 +219,18 @@ impl BindingCoordinator {
             )));
         }
         self.mark_attached(sticky_id);
+        if manually_hidden {
+            if let Err(error) = self.inner.native.suspend(sticky_id).await {
+                let _ = self.detach(sticky_id).await;
+                if let Some(previous) = previous_binding.as_ref() {
+                    self.restore_previous_or_degrade(sticky_id, previous)
+                        .await?;
+                } else {
+                    let _ = self.inner.windows.restore_unbound_pinning(sticky_id).await;
+                }
+                return Err(error);
+            }
+        }
 
         let binding = match self.inner.repository.bind(sticky_id, &target).await {
             Ok(binding) => binding,
@@ -239,7 +260,7 @@ impl BindingCoordinator {
             return Err(error);
         }
 
-        let runtime_state = if self.inner.repository.manually_hidden(sticky_id).await? {
+        let runtime_state = if manually_hidden {
             RuntimeState::ManuallyHidden
         } else {
             RuntimeState::Visible
@@ -273,15 +294,19 @@ impl BindingCoordinator {
                 .await?;
             return Err(error);
         }
-        self.inner
-            .windows
-            .restore_unbound_pinning(sticky_id)
-            .await?;
+        let notification_error = self.inner.windows.binding_removed(sticky_id).await.err();
         self.inner
             .runtime_states
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(sticky_id);
+        self.inner
+            .windows
+            .restore_unbound_pinning(sticky_id)
+            .await?;
+        if let Some(error) = notification_error {
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -930,14 +955,16 @@ impl TauriNoteWindowRuntime {
 
 #[async_trait]
 impl NoteWindowRuntime for TauriNoteWindowRuntime {
-    async fn ensure_open(&self, sticky_id: &str) -> AppResult<()> {
+    async fn ensure_open(&self, sticky_id: &str, keep_hidden: bool) -> AppResult<()> {
         use tauri::Manager;
-        if self
+        let sticky = crate::db::stickies::get(&self.db, sticky_id).await?;
+        if keep_hidden {
+            crate::windows::open_for_binding(&self.app, &sticky).await?;
+        } else if self
             .app
             .get_webview_window(&crate::windows::label(sticky_id))
             .is_none()
         {
-            let sticky = crate::db::stickies::get(&self.db, sticky_id).await?;
             crate::windows::open(&self.app, &sticky).await?;
         }
         Ok(())
@@ -970,6 +997,18 @@ impl NoteWindowRuntime for TauriNoteWindowRuntime {
                 .set_always_on_top(sticky.pinned == 1)
                 .map_err(|error| AppError::Other(format!("restore global pinning: {error}")))?;
         }
+        Ok(())
+    }
+
+    async fn binding_removed(&self, sticky_id: &str) -> AppResult<()> {
+        use tauri::Emitter;
+        if let Err(error) = self.app.emit("binding-changed", sticky_id) {
+            eprintln!(
+                "[floaty] emit binding-changed failed for {}: {}",
+                sticky_id, error
+            );
+        }
+        crate::tray::refresh_menu(&self.app).await;
         Ok(())
     }
 
@@ -1188,8 +1227,10 @@ mod tests {
 
     struct FakeWindows {
         geometry: Mutex<(i64, i64, i64, i64)>,
+        ensure_keep_hidden: Mutex<Vec<bool>>,
         reopen_count: Mutex<usize>,
         restore_pin_count: Mutex<usize>,
+        binding_removed_count: Mutex<usize>,
         fail_reopen: AtomicBool,
         fail_restore_pinning: AtomicBool,
     }
@@ -1198,8 +1239,10 @@ mod tests {
         fn default() -> Self {
             Self {
                 geometry: Mutex::new((80, 80, 320, 420)),
+                ensure_keep_hidden: Mutex::new(Vec::new()),
                 reopen_count: Mutex::new(0),
                 restore_pin_count: Mutex::new(0),
+                binding_removed_count: Mutex::new(0),
                 fail_reopen: AtomicBool::new(false),
                 fail_restore_pinning: AtomicBool::new(false),
             }
@@ -1208,7 +1251,8 @@ mod tests {
 
     #[async_trait]
     impl NoteWindowRuntime for FakeWindows {
-        async fn ensure_open(&self, _sticky_id: &str) -> AppResult<()> {
+        async fn ensure_open(&self, _sticky_id: &str, keep_hidden: bool) -> AppResult<()> {
+            self.ensure_keep_hidden.lock().unwrap().push(keep_hidden);
             Ok(())
         }
 
@@ -1232,6 +1276,11 @@ mod tests {
             } else {
                 Ok(())
             }
+        }
+
+        async fn binding_removed(&self, _sticky_id: &str) -> AppResult<()> {
+            *self.binding_removed_count.lock().unwrap() += 1;
+            Ok(())
         }
     }
 
@@ -1970,9 +2019,43 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+        assert_eq!(*harness.windows.binding_removed_count.lock().unwrap(), 1);
 
         harness.coordinator.unbind(STICKY_ID).await.unwrap();
         assert_eq!(*harness.windows.restore_pin_count.lock().unwrap(), 2);
+        assert_eq!(*harness.windows.binding_removed_count.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn reconnecting_a_manually_hidden_note_never_opens_it_visibly() {
+        let harness = Harness::active(true);
+        {
+            let mut binding = harness.repository.binding.lock().unwrap();
+            let binding = binding.as_mut().unwrap();
+            binding.state = BindingState::ReconnectRequired;
+            binding.runtime_pid = None;
+            binding.runtime_window_id = None;
+        }
+
+        harness
+            .coordinator
+            .bind(STICKY_ID, descriptor())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            *harness.windows.ensure_keep_hidden.lock().unwrap(),
+            vec![true]
+        );
+        assert_eq!(
+            *harness.native.calls.lock().unwrap(),
+            vec![NativeCall::Attach(TARGET_WINDOW_ID), NativeCall::Suspend]
+        );
+        assert_eq!(
+            harness.coordinator.runtime_state_for(STICKY_ID),
+            Some(RuntimeState::ManuallyHidden)
+        );
+        assert!(harness.repository.hidden.load(Ordering::SeqCst));
     }
 
     #[tokio::test]

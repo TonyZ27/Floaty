@@ -6,7 +6,7 @@ use crate::db::{
     Db,
 };
 use crate::error::{AppError, AppResult};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 #[tauri::command]
 pub async fn get_or_create_default_sticky(app: AppHandle, db: State<'_, Db>) -> AppResult<Sticky> {
@@ -74,7 +74,8 @@ pub async fn update_sticky(
 #[tauri::command]
 pub async fn delete_sticky(app: AppHandle, db: State<'_, Db>, id: String) -> AppResult<()> {
     let binding = db::window_bindings::get(&db, &id).await?;
-    if binding.is_some() {
+    let was_bound = binding.is_some();
+    if was_bound {
         let coordinator = app
             .try_state::<crate::assignment::coordinator::BindingCoordinator>()
             .ok_or_else(|| AppError::Other("window binding coordinator unavailable".into()))?;
@@ -88,6 +89,14 @@ pub async fn delete_sticky(app: AppHandle, db: State<'_, Db>, id: String) -> App
     } else {
         close_sticky_window(&app, &id)?;
         db::stickies::delete(&db, &id).await?;
+    }
+    if was_bound {
+        if let Err(error) = app.emit("binding-changed", &id) {
+            eprintln!(
+                "[floaty] emit binding-changed after delete failed for {}: {}",
+                id, error
+            );
+        }
     }
     crate::tray::refresh_menu(&app).await;
     Ok(())

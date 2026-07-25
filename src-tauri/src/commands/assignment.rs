@@ -134,14 +134,10 @@ pub async fn bind_note_to_window(
 
 #[tauri::command]
 pub async fn unbind_note_from_window(
-    app: AppHandle,
     coordinator: State<'_, BindingCoordinator>,
     sticky_id: String,
 ) -> AppResult<()> {
-    coordinator.unbind(&sticky_id).await?;
-    emit_binding_changed(&app, &sticky_id);
-    crate::tray::refresh_menu(&app).await;
-    Ok(())
+    coordinator.unbind(&sticky_id).await
 }
 
 #[tauri::command]

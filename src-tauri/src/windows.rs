@@ -17,8 +17,33 @@ pub fn id_from_label(label: &str) -> Option<&str> {
 
 /// 打开一个便签窗口（已存在则 show + focus）。成功返回 WebviewWindow。
 pub async fn open(app: &AppHandle, sticky: &Sticky) -> AppResult<WebviewWindow> {
+    open_with_mode(app, sticky, false).await
+}
+
+/// Ensures a manually hidden Note has a native window for attachment without
+/// revealing it in the current Space.
+pub async fn open_for_binding(
+    app: &AppHandle,
+    sticky: &Sticky,
+) -> AppResult<WebviewWindow> {
+    open_with_mode(app, sticky, true).await
+}
+
+async fn open_with_mode(
+    app: &AppHandle,
+    sticky: &Sticky,
+    keep_hidden: bool,
+) -> AppResult<WebviewWindow> {
     let lbl = label(&sticky.id);
     if let Some(w) = app.get_webview_window(&lbl) {
+        if keep_hidden {
+            let _ = w.set_always_on_top(false);
+            w.set_position(tauri::LogicalPosition::new(-32000.0, -32000.0))
+                .map_err(|e| {
+                    AppError::Other(format!("window set_position binding hidden: {}", e))
+                })?;
+            return Ok(w);
+        }
         w.show().ok();
         w.set_focus().ok();
         return Ok(w);
@@ -50,7 +75,9 @@ pub async fn open(app: &AppHandle, sticky: &Sticky) -> AppResult<WebviewWindow> 
             .max_inner_size(1600.0, 1600.0);
     }
 
-    if let (Some(x), Some(y)) = (sticky.x, sticky.y) {
+    if keep_hidden {
+        builder = builder.position(-32000.0, -32000.0);
+    } else if let (Some(x), Some(y)) = (sticky.x, sticky.y) {
         if let Some((sx, sy)) = sanitize_position(x, y) {
             // 再检查一遍矩形是否在任一显示器可见区域内
             // （用户拔副屏 / 当前桌面空间不同 / dev restart 时显示器刚连上时）

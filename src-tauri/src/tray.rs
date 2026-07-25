@@ -2,11 +2,35 @@ use crate::db::{self, stickies::Sticky, Db};
 use tauri::{
     menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu},
     tray::TrayIconBuilder,
-    AppHandle, Manager,
+    AppHandle, Emitter, Manager,
 };
 
 /// sticky + 内容首行预览，用作菜单里的标题。
 type StickyRow = (Sticky, Option<String>);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StickyOpenRoute {
+    BindingCoordinator,
+    ShowUnbound,
+    FocusUnbound,
+    OpenUnbound,
+}
+
+fn sticky_open_route(
+    binding_state: Option<crate::assignment::BindingState>,
+    is_hidden: bool,
+    has_window: bool,
+) -> StickyOpenRoute {
+    if binding_state.is_some() {
+        StickyOpenRoute::BindingCoordinator
+    } else if is_hidden {
+        StickyOpenRoute::ShowUnbound
+    } else if has_window {
+        StickyOpenRoute::FocusUnbound
+    } else {
+        StickyOpenRoute::OpenUnbound
+    }
+}
 
 async fn load_all_with_preview(db: &Db) -> Vec<StickyRow> {
     let all = db::stickies::list_all(db).await.unwrap_or_default();
@@ -197,7 +221,27 @@ fn build_menu(
 
 #[cfg(test)]
 mod tests {
-    use super::extract_title;
+    use super::{extract_title, sticky_open_route, StickyOpenRoute};
+    use crate::assignment::BindingState;
+
+    #[test]
+    fn every_binding_state_routes_to_the_coordinator_before_window_state() {
+        for state in [
+            BindingState::Active,
+            BindingState::TargetClosed,
+            BindingState::ReconnectRequired,
+            BindingState::Unavailable,
+        ] {
+            for (hidden, has_window) in
+                [(false, false), (false, true), (true, false), (true, true)]
+            {
+                assert_eq!(
+                    sticky_open_route(Some(state), hidden, has_window),
+                    StickyOpenRoute::BindingCoordinator
+                );
+            }
+        }
+    }
 
     #[test]
     fn heading() {
@@ -362,19 +406,49 @@ fn on_menu_event(app: &AppHandle, event: MenuEvent) {
             let db = handle.state::<Db>();
             match db::stickies::get(&db, &sticky_id).await {
                 Ok(s) => {
-                    if s.hidden == 1 {
-                        if let Err(e) = crate::windows::show(&handle, &sticky_id, &db).await {
-                            eprintln!("[floaty] tray show failed: {}", e);
+                    let binding_state = match db::window_bindings::get(&db, &sticky_id).await {
+                        Ok(binding) => binding.map(|binding| binding.state),
+                        Err(e) => {
+                            eprintln!("[floaty] tray binding lookup failed: {}", e);
+                            return;
                         }
-                        refresh_menu(&handle).await;
-                    } else if let Some(w) = handle.get_webview_window(&crate::windows::label(&sticky_id)) {
-                        if let Err(e) = w.set_focus() {
-                            eprintln!("[floaty] tray focus failed: {}", e);
+                    };
+                    let window =
+                        handle.get_webview_window(&crate::windows::label(&sticky_id));
+                    match sticky_open_route(binding_state, s.hidden == 1, window.is_some()) {
+                        StickyOpenRoute::BindingCoordinator => {
+                            let result = match handle.try_state::<
+                                crate::assignment::coordinator::BindingCoordinator,
+                            >() {
+                                Some(coordinator) => coordinator.reopen(&sticky_id).await.map(|_| ()),
+                                None => Err(crate::error::AppError::Other(
+                                    "window binding coordinator unavailable".into(),
+                                )),
+                            };
+                            if let Err(e) = result {
+                                eprintln!("[floaty] tray bound-note reopen failed: {}", e);
+                            } else if let Err(e) = handle.emit("binding-changed", &sticky_id) {
+                                eprintln!("[floaty] tray binding-changed emit failed: {}", e);
+                            }
+                            refresh_menu(&handle).await;
                         }
-                    } else {
-                        // Window missing despite hidden=0; reopen.
-                        if let Err(e) = crate::windows::open(&handle, &s).await {
-                            eprintln!("[floaty] tray reopen failed: {}", e);
+                        StickyOpenRoute::ShowUnbound => {
+                            if let Err(e) = crate::windows::show(&handle, &sticky_id, &db).await {
+                                eprintln!("[floaty] tray show failed: {}", e);
+                            }
+                            refresh_menu(&handle).await;
+                        }
+                        StickyOpenRoute::FocusUnbound => {
+                            if let Some(window) = window {
+                                if let Err(e) = window.set_focus() {
+                                    eprintln!("[floaty] tray focus failed: {}", e);
+                                }
+                            }
+                        }
+                        StickyOpenRoute::OpenUnbound => {
+                            if let Err(e) = crate::windows::open(&handle, &s).await {
+                                eprintln!("[floaty] tray reopen failed: {}", e);
+                            }
                         }
                     }
                 }
