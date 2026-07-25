@@ -804,20 +804,25 @@ impl BindingRepository for DbBindingRepository {
     }
 }
 
-#[cfg(target_os = "macos")]
 pub struct MainThreadWindowCatalog {
     app: tauri::AppHandle,
     catalog: Arc<dyn crate::assignment::WindowCatalog>,
 }
 
-#[cfg(target_os = "macos")]
 impl MainThreadWindowCatalog {
     pub fn new(app: tauri::AppHandle, catalog: Arc<dyn crate::assignment::WindowCatalog>) -> Self {
         Self { app, catalog }
     }
+
+    pub async fn list_eligible(&self) -> AppResult<Vec<WindowDescriptor>> {
+        run_on_main_thread(&self.app, {
+            let catalog = self.catalog.clone();
+            move || catalog.list_eligible()
+        })
+        .await
+    }
 }
 
-#[cfg(target_os = "macos")]
 #[async_trait]
 impl BindingWindowCatalog for MainThreadWindowCatalog {
     async fn contains(&self, pid: i32, window_id: u32) -> AppResult<bool> {
@@ -968,13 +973,19 @@ impl NoteWindowRuntime for TauriNoteWindowRuntime {
         Ok(())
     }
 
-    async fn binding_changed(&self, _binding: &WindowBinding) -> AppResult<()> {
+    async fn binding_changed(&self, binding: &WindowBinding) -> AppResult<()> {
+        use tauri::Emitter;
+        if let Err(error) = self.app.emit("binding-changed", &binding.sticky_id) {
+            eprintln!(
+                "[floaty] emit binding-changed failed for {}: {}",
+                binding.sticky_id, error
+            );
+        }
         crate::tray::refresh_menu(&self.app).await;
         Ok(())
     }
 }
 
-#[cfg(target_os = "macos")]
 async fn run_on_main_thread<T, F>(app: &tauri::AppHandle, operation: F) -> AppResult<T>
 where
     T: Send + 'static,

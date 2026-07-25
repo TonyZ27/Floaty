@@ -159,6 +159,7 @@ pub async fn reveal_for_binding(
 
 /// 切换 always-on-top。返回新的 pinned 状态。
 pub async fn toggle_pin(app: &AppHandle, sticky_id: &str, db: &Db) -> AppResult<bool> {
+    ensure_pin_is_user_managed(db, sticky_id).await?;
     let s = db::stickies::get(db, sticky_id).await?;
     let next = if s.pinned == 1 { 0 } else { 1 };
     db::stickies::update(
@@ -175,6 +176,15 @@ pub async fn toggle_pin(app: &AppHandle, sticky_id: &str, db: &Db) -> AppResult<
             .map_err(|e| AppError::Other(format!("set_always_on_top: {}", e)))?;
     }
     Ok(next == 1)
+}
+
+async fn ensure_pin_is_user_managed(db: &Db, sticky_id: &str) -> AppResult<()> {
+    if db::window_bindings::get(db, sticky_id).await?.is_some() {
+        return Err(AppError::Other(
+            "pin is managed by the active window binding".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -209,7 +219,7 @@ pub fn resume_for_binding(
 /// 一键排版：把所有可见便签按网格重新摆放（320x420 + 40px 间距，4 列 wrap）。
 /// 隐藏的便签不动，等显示时再排。
 pub async fn tile_all(app: &AppHandle, db: &Db) -> AppResult<usize> {
-    let visible = db::stickies::list_visible(db).await?;
+    let visible = db::stickies::list_visible_unbound(db).await?;
     let start_x = 50_i64;
     let start_y = 50_i64;
     let cell_w = 320_i64 + 40;
@@ -266,7 +276,7 @@ pub async fn tile_all(app: &AppHandle, db: &Db) -> AppResult<usize> {
 /// - hidden=0 无 window（异常）：open 重建
 /// 返回被操作的便签数。
 pub async fn show_all(app: &AppHandle, db: &Db) -> AppResult<usize> {
-    let all = db::stickies::list_all(db).await?;
+    let all = db::stickies::list_all_unbound(db).await?;
     let mut shown = 0;
     for s in &all {
         if s.hidden == 1 {
@@ -574,4 +584,58 @@ fn attach_geometry_listener(window: &WebviewWindow, sticky_id: String) -> AppRes
         });
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod binding_policy_tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    async fn test_pool() -> Db {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::migrations::run(&pool).await.unwrap();
+        pool
+    }
+
+    #[tokio::test]
+    async fn pin_is_rejected_for_every_persisted_binding_state() {
+        for state in [
+            crate::assignment::BindingState::Active,
+            crate::assignment::BindingState::TargetClosed,
+            crate::assignment::BindingState::ReconnectRequired,
+            crate::assignment::BindingState::Unavailable,
+        ] {
+            let db = test_pool().await;
+            let sticky = db::stickies::create_default(&db).await.unwrap();
+            db::window_bindings::bind(
+                &db,
+                db::window_bindings::NewWindowBinding {
+                    sticky_id: sticky.id.clone(),
+                    app_bundle_id: "com.example.Target".into(),
+                    app_name: "Target".into(),
+                    window_title: "Document".into(),
+                    runtime_pid: 42,
+                    runtime_window_id: 101,
+                },
+            )
+            .await
+            .unwrap();
+            db::window_bindings::set_state_and_clear_runtime(&db, &sticky.id, state)
+                .await
+                .unwrap();
+
+            let error = ensure_pin_is_user_managed(&db, &sticky.id)
+                .await
+                .unwrap_err();
+
+            assert_eq!(
+                error.to_string(),
+                "pin is managed by the active window binding"
+            );
+        }
+    }
 }

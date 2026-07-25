@@ -1,7 +1,27 @@
 use crate::db::Db;
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::windows;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, Manager, State};
+
+async fn reopen_if_bound(app: &AppHandle, db: &Db, sticky_id: &str) -> AppResult<bool> {
+    if crate::db::window_bindings::get(db, sticky_id)
+        .await?
+        .is_none()
+    {
+        return Ok(false);
+    }
+    let coordinator = app
+        .try_state::<crate::assignment::coordinator::BindingCoordinator>()
+        .ok_or_else(|| AppError::Other("window binding coordinator unavailable".into()))?;
+    coordinator.reopen(sticky_id).await?;
+    if let Err(error) = app.emit("binding-changed", sticky_id) {
+        eprintln!(
+            "[floaty] emit binding-changed failed for {}: {}",
+            sticky_id, error
+        );
+    }
+    Ok(true)
+}
 
 #[tauri::command]
 pub async fn open_sticky_window(
@@ -9,8 +29,10 @@ pub async fn open_sticky_window(
     db: State<'_, Db>,
     sticky_id: String,
 ) -> AppResult<()> {
-    let sticky = crate::db::stickies::get(&db, &sticky_id).await?;
-    windows::open(&app, &sticky).await?;
+    if !reopen_if_bound(&app, &db, &sticky_id).await? {
+        let sticky = crate::db::stickies::get(&db, &sticky_id).await?;
+        windows::open(&app, &sticky).await?;
+    }
     crate::tray::refresh_menu(&app).await;
     Ok(())
 }
@@ -22,6 +44,26 @@ pub async fn hide_sticky(
     sticky_id: String,
 ) -> AppResult<()> {
     windows::hide(&app, &sticky_id, &db).await?;
+    if crate::db::window_bindings::get(&db, &sticky_id)
+        .await?
+        .is_some()
+    {
+        let coordinator = app
+            .try_state::<crate::assignment::coordinator::BindingCoordinator>()
+            .ok_or_else(|| AppError::Other("window binding coordinator unavailable".into()))?;
+        coordinator
+            .handle(
+                &sticky_id,
+                crate::assignment::BindingEvent::UserHidNote,
+            )
+            .await?;
+        if let Err(error) = app.emit("binding-changed", &sticky_id) {
+            eprintln!(
+                "[floaty] emit binding-changed failed for {}: {}",
+                sticky_id, error
+            );
+        }
+    }
     crate::tray::refresh_menu(&app).await;
     Ok(())
 }
@@ -32,7 +74,9 @@ pub async fn show_sticky(
     db: State<'_, Db>,
     sticky_id: String,
 ) -> AppResult<()> {
-    windows::show(&app, &sticky_id, &db).await?;
+    if !reopen_if_bound(&app, &db, &sticky_id).await? {
+        windows::show(&app, &sticky_id, &db).await?;
+    }
     crate::tray::refresh_menu(&app).await;
     Ok(())
 }

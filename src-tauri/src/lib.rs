@@ -79,20 +79,26 @@ pub fn run() {
             )
             .expect("mark bindings reconnect-required");
 
+            use std::sync::Arc;
+            #[cfg(target_os = "macos")]
+            let raw_window_catalog: Arc<dyn assignment::WindowCatalog> = Arc::new(
+                platform::macos::window_catalog::MacOSWindowCatalog::default(),
+            );
+            #[cfg(not(target_os = "macos"))]
+            let raw_window_catalog: Arc<dyn assignment::WindowCatalog> =
+                Arc::new(assignment::UnsupportedWindowCatalog);
+            let window_catalog = Arc::new(
+                assignment::coordinator::MainThreadWindowCatalog::new(
+                    handle.clone(),
+                    raw_window_catalog,
+                ),
+            );
+            app.manage(window_catalog.clone());
+
             #[cfg(target_os = "macos")]
             {
-                use std::sync::Arc;
-
                 let repository = Arc::new(
                     assignment::coordinator::DbBindingRepository::new(pool.clone()),
-                );
-                let catalog = Arc::new(
-                    assignment::coordinator::MainThreadWindowCatalog::new(
-                        handle.clone(),
-                        Arc::new(
-                            platform::macos::window_catalog::MacOSWindowCatalog::default(),
-                        ),
-                    ),
                 );
                 let spaces = Arc::new(
                     platform::macos::window_spaces::MacOSWindowSpaceBackend::default(),
@@ -116,7 +122,7 @@ pub fn run() {
                 );
                 app.manage(assignment::coordinator::BindingCoordinator::new(
                     repository,
-                    catalog,
+                    window_catalog,
                     native,
                     note_windows,
                     observers,
@@ -180,6 +186,16 @@ pub fn run() {
             commands::stickies::restore_sticky,
             commands::stickies::purge_sticky,
             commands::stickies::empty_trash,
+            commands::assignment::get_accessibility_status,
+            commands::assignment::request_accessibility_permission,
+            commands::assignment::open_accessibility_settings,
+            commands::assignment::list_eligible_windows,
+            commands::assignment::get_window_binding,
+            commands::assignment::list_window_bindings,
+            commands::assignment::bind_note_to_window,
+            commands::assignment::unbind_note_from_window,
+            commands::assignment::reopen_bound_note,
+            commands::assignment::open_window_picker,
             commands::items::list_items,
             commands::items::upsert_item,
             commands::items::toggle_item,

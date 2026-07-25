@@ -84,6 +84,20 @@ pub async fn list_visible_unbound(db: &Db) -> AppResult<Vec<Sticky>> {
     Ok(rows)
 }
 
+pub async fn list_all_unbound(db: &Db) -> AppResult<Vec<Sticky>> {
+    let rows = sqlx::query_as::<_, Sticky>(
+        "SELECT s.* FROM stickies s
+         WHERE s.deleted_at IS NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM window_bindings b WHERE b.sticky_id = s.id
+           )
+         ORDER BY s.z_order ASC, s.created_at ASC",
+    )
+    .fetch_all(db)
+    .await?;
+    Ok(rows)
+}
+
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct StickyPatch {
     pub title: Option<String>,
@@ -283,6 +297,46 @@ mod tests {
             vec![unbound.id.as_str()]
         );
         assert_eq!(get(&pool, &bound.id).await.unwrap().hidden, 0);
+    }
+
+    #[tokio::test]
+    async fn list_all_unbound_excludes_visible_and_hidden_bound_notes() {
+        let pool = test_pool().await;
+        let visible_bound = create_default(&pool).await.unwrap();
+        let hidden_bound = create_default(&pool).await.unwrap();
+        let unbound = create_default(&pool).await.unwrap();
+        update(
+            &pool,
+            &hidden_bound.id,
+            StickyPatch {
+                hidden: Some(1),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        for sticky in [&visible_bound, &hidden_bound] {
+            crate::db::window_bindings::bind(
+                &pool,
+                crate::db::window_bindings::NewWindowBinding {
+                    sticky_id: sticky.id.clone(),
+                    app_bundle_id: "com.example.Target".into(),
+                    app_name: "Target".into(),
+                    window_title: "Document".into(),
+                    runtime_pid: 42,
+                    runtime_window_id: 101,
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        let rows = list_all_unbound(&pool).await.unwrap();
+
+        assert_eq!(
+            rows.iter().map(|sticky| sticky.id.as_str()).collect::<Vec<_>>(),
+            vec![unbound.id.as_str()]
+        );
     }
 
     #[tokio::test]

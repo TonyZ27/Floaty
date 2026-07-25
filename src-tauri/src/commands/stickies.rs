@@ -1,4 +1,10 @@
-use crate::db::{self, stickies::{Sticky, StickyPatch}, Db};
+use std::future::Future;
+
+use crate::db::{
+    self,
+    stickies::{Sticky, StickyPatch},
+    Db,
+};
 use crate::error::{AppError, AppResult};
 use tauri::{AppHandle, Manager, State};
 
@@ -67,13 +73,48 @@ pub async fn update_sticky(
 
 #[tauri::command]
 pub async fn delete_sticky(app: AppHandle, db: State<'_, Db>, id: String) -> AppResult<()> {
-    // 软删：关闭窗口 + 设 deleted_at（items / reminders 暂留，等 purge 时再物理级联）
-    if let Some(w) = app.get_webview_window(&crate::windows::label(&id)) {
-        w.close()
-            .map_err(|e| AppError::Other(format!("delete_sticky close: {}", e)))?;
+    let binding = db::window_bindings::get(&db, &id).await?;
+    if binding.is_some() {
+        let coordinator = app
+            .try_state::<crate::assignment::coordinator::BindingCoordinator>()
+            .ok_or_else(|| AppError::Other("window binding coordinator unavailable".into()))?;
+        prepare_close_and_soft_delete(
+            &db,
+            &id,
+            || coordinator.prepare_delete(&id),
+            || close_sticky_window(&app, &id),
+        )
+        .await?;
+    } else {
+        close_sticky_window(&app, &id)?;
+        db::stickies::delete(&db, &id).await?;
     }
-    db::stickies::delete(&db, &id).await?;
     crate::tray::refresh_menu(&app).await;
+    Ok(())
+}
+
+async fn prepare_close_and_soft_delete<F, Fut, C>(
+    db: &Db,
+    sticky_id: &str,
+    prepare: F,
+    close: C,
+) -> AppResult<()>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = AppResult<()>>,
+    C: FnOnce() -> AppResult<()>,
+{
+    prepare().await?;
+    close()?;
+    db::stickies::delete(db, sticky_id).await
+}
+
+fn close_sticky_window(app: &AppHandle, sticky_id: &str) -> AppResult<()> {
+    if let Some(window) = app.get_webview_window(&crate::windows::label(sticky_id)) {
+        window
+            .close()
+            .map_err(|error| AppError::Other(format!("delete_sticky close: {error}")))?;
+    }
     Ok(())
 }
 
@@ -105,4 +146,154 @@ pub async fn empty_trash(app: AppHandle, db: State<'_, Db>) -> AppResult<u64> {
     let count = db::stickies::purge_older_than(&db, future).await?;
     crate::tray::refresh_menu(&app).await;
     Ok(count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+    use std::sync::{Arc, Mutex};
+
+    async fn test_pool() -> Db {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::migrations::run(&pool).await.unwrap();
+        pool
+    }
+
+    async fn bind_test_window(db: &Db, sticky_id: &str) {
+        db::window_bindings::bind(
+            db,
+            db::window_bindings::NewWindowBinding {
+                sticky_id: sticky_id.into(),
+                app_bundle_id: "com.example.Target".into(),
+                app_name: "Target".into(),
+                window_title: "Document".into(),
+                runtime_pid: 42,
+                runtime_window_id: 101,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn soft_delete_prepares_runtime_then_removes_binding_transactionally() {
+        let db = test_pool().await;
+        let sticky = db::stickies::create_default(&db).await.unwrap();
+        bind_test_window(&db, &sticky.id).await;
+        let order = Arc::new(Mutex::new(Vec::new()));
+
+        prepare_close_and_soft_delete(
+            &db,
+            &sticky.id,
+            {
+                let order = order.clone();
+                || async move {
+                    order.lock().unwrap().push("prepare");
+                    Ok(())
+                }
+            },
+            {
+                let order = order.clone();
+                move || {
+                    order.lock().unwrap().push("close");
+                    Ok(())
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(*order.lock().unwrap(), vec!["prepare", "close"]);
+        assert!(db::window_bindings::get(&db, &sticky.id)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(db::stickies::get(&db, &sticky.id)
+            .await
+            .unwrap()
+            .deleted_at
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn soft_delete_failure_happens_after_prepare_and_keeps_binding_row() {
+        let db = test_pool().await;
+        let sticky = db::stickies::create_default(&db).await.unwrap();
+        bind_test_window(&db, &sticky.id).await;
+        sqlx::query(
+            "CREATE TRIGGER fail_soft_delete
+             BEFORE UPDATE OF deleted_at ON stickies
+             WHEN NEW.deleted_at IS NOT NULL
+             BEGIN SELECT RAISE(ABORT, 'blocked'); END",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let prepared = Arc::new(Mutex::new(false));
+
+        let closed = Arc::new(Mutex::new(false));
+        let result = prepare_close_and_soft_delete(
+            &db,
+            &sticky.id,
+            {
+                let prepared = prepared.clone();
+                || async move {
+                    *prepared.lock().unwrap() = true;
+                    Ok(())
+                }
+            },
+            {
+                let closed = closed.clone();
+                move || {
+                    *closed.lock().unwrap() = true;
+                    Ok(())
+                }
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(*prepared.lock().unwrap());
+        assert!(*closed.lock().unwrap());
+        assert!(db::window_bindings::get(&db, &sticky.id)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(db::stickies::get(&db, &sticky.id)
+            .await
+            .unwrap()
+            .deleted_at
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn close_failure_stops_before_soft_delete() {
+        let db = test_pool().await;
+        let sticky = db::stickies::create_default(&db).await.unwrap();
+        bind_test_window(&db, &sticky.id).await;
+
+        let result = prepare_close_and_soft_delete(
+            &db,
+            &sticky.id,
+            || async { Ok(()) },
+            || Err(AppError::Other("close failed".into())),
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err().to_string(), "close failed");
+        assert!(db::window_bindings::get(&db, &sticky.id)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(db::stickies::get(&db, &sticky.id)
+            .await
+            .unwrap()
+            .deleted_at
+            .is_none());
+    }
 }

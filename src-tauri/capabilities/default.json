@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Capability for all floaty windows",
-  "windows": ["sticky-*", "preferences", "search"],
+  "windows": ["sticky-*", "window-picker-*", "preferences", "search"],
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",

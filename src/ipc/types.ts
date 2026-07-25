@@ -54,3 +54,31 @@ export interface StickyPatch {
   collapsed?: number;
   collapsed_w?: number;
 }
+
+export type AccessibilityStatus = "granted" | "denied";
+
+export type BindingState =
+  | "active"
+  | "target_closed"
+  | "reconnect_required"
+  | "unavailable";
+
+export interface WindowDescriptor {
+  appBundleId: string;
+  appName: string;
+  appIconDataUrl: string | null;
+  pid: number;
+  windowId: number;
+  windowTitle: string;
+}
+
+export interface WindowBindingView {
+  stickyId: string;
+  appBundleId: string;
+  appName: string;
+  /** Live metadata; null when the exact target is no longer available. */
+  appIconDataUrl: string | null;
+  windowTitle: string;
+  state: BindingState;
+  manuallyHidden: boolean;
+}
