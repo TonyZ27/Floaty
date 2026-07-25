@@ -22,10 +22,14 @@ function isStaleTargetError(error: unknown): boolean {
   return String(error).includes(STALE_TARGET_ERROR);
 }
 
-function closePicker(): void {
-  void getCurrentWindow().close().catch((error: unknown) => {
+async function closePicker(): Promise<boolean> {
+  try {
+    await getCurrentWindow().close();
+    return true;
+  } catch (error) {
     console.error("[floaty] close window picker failed:", error);
-  });
+    return false;
+  }
 }
 
 export function WindowPickerPage({ stickyId }: { stickyId: string }) {
@@ -72,7 +76,7 @@ export function WindowPickerPage({ stickyId }: { stickyId: string }) {
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       event.preventDefault();
-      closePicker();
+      void closePicker();
     };
     document.addEventListener("keydown", handleEscape);
     return () => document.removeEventListener("keydown", handleEscape);
@@ -96,12 +100,16 @@ export function WindowPickerPage({ stickyId }: { stickyId: string }) {
   const selectWindow = async (target: WindowDescriptor) => {
     if (selectionPending.current) return;
     selectionPending.current = true;
+    let bindingSucceeded = false;
     const selectedKey = targetKey(target);
     setSelectingKey(selectedKey);
     setNotice(null);
     try {
       await ipc.bindNoteToWindow(stickyId, target);
-      closePicker();
+      bindingSucceeded = true;
+      if (!(await closePicker())) {
+        setNotice("绑定成功，请手动关闭此窗口。");
+      }
     } catch (error) {
       if (isStaleTargetError(error)) {
         const remaining = windows.filter(
@@ -114,8 +122,10 @@ export function WindowPickerPage({ stickyId }: { stickyId: string }) {
         setNotice("绑定失败，请重试。");
       }
     } finally {
-      selectionPending.current = false;
-      setSelectingKey(null);
+      if (!bindingSucceeded) {
+        selectionPending.current = false;
+        setSelectingKey(null);
+      }
     }
   };
 
@@ -206,7 +216,7 @@ export function WindowPickerPage({ stickyId }: { stickyId: string }) {
                 <RefreshCw size={14} aria-hidden="true" />
                 刷新
               </button>
-              <button type="button" onClick={closePicker}>
+              <button type="button" onClick={() => void closePicker()}>
                 取消
               </button>
             </div>
@@ -227,7 +237,7 @@ export function WindowPickerPage({ stickyId }: { stickyId: string }) {
                 <RefreshCw size={14} aria-hidden="true" />
                 重试
               </button>
-              <button type="button" onClick={closePicker}>
+              <button type="button" onClick={() => void closePicker()}>
                 取消
               </button>
             </div>
@@ -237,6 +247,7 @@ export function WindowPickerPage({ stickyId }: { stickyId: string }) {
         {state === "ready" && (
           <div
             className="window-picker-grid"
+            role="group"
             aria-label="可绑定窗口"
             aria-busy={selectionPending.current}
           >

@@ -201,6 +201,23 @@ describe("WindowPickerPage", () => {
     await waitFor(() => expect(mocks.close).toHaveBeenCalledTimes(1));
   });
 
+  it("does not permit another bind when closing fails after success", async () => {
+    mocks.close.mockRejectedValueOnce("close failed");
+    render(<WindowPickerPage stickyId={STICKY_ID} />);
+    const card = await screen.findByRole("button", {
+      name: "Chrome，Project Alpha",
+    });
+
+    fireEvent.click(card);
+
+    expect(
+      await screen.findByText("绑定成功，请手动关闭此窗口。"),
+    ).toBeVisible();
+    expect(card).toBeDisabled();
+    fireEvent.click(card);
+    expect(mocks.ipc.bindNoteToWindow).toHaveBeenCalledTimes(1);
+  });
+
   it("removes only a stale target and explains the selection race", async () => {
     mocks.ipc.listEligibleWindows.mockResolvedValue([chromeWindow, figmaWindow]);
     mocks.ipc.bindNoteToWindow.mockRejectedValue(
@@ -257,6 +274,11 @@ describe("window picker routing", () => {
     ]) {
       expect(parseWindowLabel(label)).toEqual({ kind: "unknown" });
     }
+    expect(parseWindowLabel(`sticky-${STICKY_ID}`)).toEqual({
+      kind: "sticky",
+      stickyId: STICKY_ID,
+    });
+    expect(parseWindowLabel("sticky-not-an-id")).toEqual({ kind: "unknown" });
   });
 
   it("falls back safely for an invalid picker label without loading sticky data", async () => {
