@@ -38,7 +38,8 @@ export function WindowPickerPage({ stickyId }: { stickyId: string }) {
   const [notice, setNotice] = useState<string | null>(null);
   const [selectingKey, setSelectingKey] = useState<string | null>(null);
   const requestGeneration = useRef(0);
-  const selectionPending = useRef(false);
+  const bindInFlight = useRef(false);
+  const selectionLocked = useRef(false);
   const mounted = useRef(false);
   const focusIndex = useRef(0);
   const cardRefs = useRef<Array<HTMLButtonElement | null>>([]);
@@ -81,7 +82,7 @@ export function WindowPickerPage({ stickyId }: { stickyId: string }) {
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       event.preventDefault();
-      if (selectionPending.current) return;
+      if (bindInFlight.current) return;
       void closePicker();
     };
     document.addEventListener("keydown", handleEscape);
@@ -107,8 +108,9 @@ export function WindowPickerPage({ stickyId }: { stickyId: string }) {
   };
 
   const selectWindow = async (target: WindowDescriptor, selectedIndex: number) => {
-    if (selectionPending.current) return;
-    selectionPending.current = true;
+    if (selectionLocked.current) return;
+    selectionLocked.current = true;
+    bindInFlight.current = true;
     focusIndex.current = selectedIndex;
     let bindingSucceeded = false;
     const selectedKey = targetKey(target);
@@ -118,7 +120,9 @@ export function WindowPickerPage({ stickyId }: { stickyId: string }) {
       await ipc.bindNoteToWindow(stickyId, target);
       bindingSucceeded = true;
       if (!mounted.current) return;
-      if (!(await closePicker())) {
+      const closed = await closePicker();
+      bindInFlight.current = false;
+      if (!closed) {
         if (mounted.current) {
           setNotice("绑定成功，请手动关闭此窗口。");
         }
@@ -138,7 +142,8 @@ export function WindowPickerPage({ stickyId }: { stickyId: string }) {
       }
     } finally {
       if (!bindingSucceeded && mounted.current) {
-        selectionPending.current = false;
+        bindInFlight.current = false;
+        selectionLocked.current = false;
         setSelectingKey(null);
       }
     }
@@ -277,7 +282,7 @@ export function WindowPickerPage({ stickyId }: { stickyId: string }) {
             className="window-picker-grid"
             role="group"
             aria-label="可绑定窗口"
-            aria-busy={selectionPending.current}
+            aria-busy={bindInFlight.current}
           >
             {windows.map((target, index) => {
               const key = targetKey(target);

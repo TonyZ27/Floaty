@@ -271,6 +271,10 @@ describe("WindowPickerPage", () => {
     expect(card).toBeDisabled();
     fireEvent.click(card);
     expect(mocks.ipc.bindNoteToWindow).toHaveBeenCalledTimes(1);
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(mocks.close).toHaveBeenCalledTimes(2));
+    expect(mocks.ipc.bindNoteToWindow).toHaveBeenCalledTimes(1);
   });
 
   it("removes only a stale target and explains the selection race", async () => {
