@@ -15,18 +15,14 @@ pub enum AccessibilityStatus {
 
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
-    fn AXIsProcessTrusted() -> bool;
-    fn AXIsProcessTrustedWithOptions(options: *const c_void) -> bool;
+    fn AXIsProcessTrusted() -> u8;
+    fn AXIsProcessTrustedWithOptions(options: *const c_void) -> u8;
 }
 
 /// Checks the current trust state without presenting a system prompt.
 pub fn status() -> AccessibilityStatus {
     // SAFETY: AXIsProcessTrusted has no arguments and returns a scalar.
-    if unsafe { AXIsProcessTrusted() } {
-        AccessibilityStatus::Granted
-    } else {
-        AccessibilityStatus::Denied
-    }
+    status_from_boolean(unsafe { AXIsProcessTrusted() })
 }
 
 /// Requests trust using macOS's own Accessibility prompt.
@@ -44,11 +40,7 @@ pub fn request_with_system_prompt() -> AccessibilityStatus {
             AXIsProcessTrustedWithOptions(options.cast())
         };
 
-        if trusted {
-            AccessibilityStatus::Granted
-        } else {
-            AccessibilityStatus::Denied
-        }
+        status_from_boolean(trusted)
     })
 }
 
@@ -101,4 +93,24 @@ fn require_main_thread() -> AppResult<()> {
 unsafe fn ns_string(value: &'static [u8]) -> *mut AnyObject {
     // SAFETY: callers pass static, NUL-terminated UTF-8 byte strings.
     unsafe { msg_send![class!(NSString), stringWithUTF8String: value.as_ptr()] }
+}
+
+fn status_from_boolean(value: u8) -> AccessibilityStatus {
+    if value != 0 {
+        AccessibilityStatus::Granted
+    } else {
+        AccessibilityStatus::Denied
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apple_boolean_is_converted_without_assuming_rust_bool_abi() {
+        assert_eq!(status_from_boolean(0), AccessibilityStatus::Denied);
+        assert_eq!(status_from_boolean(1), AccessibilityStatus::Granted);
+        assert_eq!(status_from_boolean(u8::MAX), AccessibilityStatus::Granted);
+    }
 }
