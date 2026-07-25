@@ -75,6 +75,7 @@ export function BindingButton({
       onBindingChangeRef.current?.(binding);
       if (binding === null) {
         setMenuOpen(false);
+        setActionError(null);
       }
     } catch {
       if (
@@ -187,12 +188,13 @@ export function BindingButton({
         triggerRef.current?.focus();
       }
     } catch {
-      if (mountedRef.current) {
-        if (bindingRef.current) {
-          setActionError("取消绑定失败，请重试。");
-        } else {
-          setMenuOpen(false);
-        }
+      await refreshBinding();
+      if (!mountedRef.current) return;
+      if (bindingRef.current) {
+        setActionError("取消绑定失败，请重试。");
+      } else if (bindingRef.current === null) {
+        setActionError(null);
+        setMenuOpen(false);
       }
     } finally {
       actionInFlightRef.current = false;

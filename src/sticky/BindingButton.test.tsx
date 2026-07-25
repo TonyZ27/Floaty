@@ -493,4 +493,76 @@ describe("StickyPage binding and pin status", () => {
       screen.getByRole("button", { name: "绑定到窗口" }),
     ).toBeVisible();
   });
+
+  it("does not retain a false unbind error when rejection wins the event race", async () => {
+    const unbindRequest = deferred<void>();
+    mocks.ipc.getWindowBinding
+      .mockResolvedValueOnce(activeBinding)
+      .mockResolvedValue(null);
+    mocks.ipc.getSticky
+      .mockResolvedValueOnce(sticky(0))
+      .mockResolvedValue(sticky(1));
+    mocks.ipc.unbindNoteFromWindow.mockReturnValueOnce(unbindRequest.promise);
+    render(<StickyPage stickyId={STICKY_ID} />);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "已绑定到 Chrome：Project Alpha",
+      }),
+    );
+    fireEvent.click(screen.getByRole("menuitem", { name: "取消绑定" }));
+
+    unbindRequest.reject("runtime pin restoration failed");
+    const restoredPin = await screen.findByRole("button", {
+      name: "已置顶（点击取消）",
+    });
+    expect(restoredPin).toBeEnabled();
+    expect(
+      screen.getByRole("button", { name: "绑定到窗口" }),
+    ).toBeVisible();
+    expect(screen.queryByText("取消绑定失败，请重试。")).toBeNull();
+
+    await emitBindingChanged(STICKY_ID);
+    expect(
+      screen.getByRole("button", { name: "绑定到窗口" }),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("button", {
+        name: "无法打开窗口选择器，请重试",
+      }),
+    ).toBeNull();
+  });
+
+  it("recovers partial unbind by direct refresh when event subscription failed", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    mocks.listen.mockRejectedValueOnce("listen failed");
+    mocks.ipc.getWindowBinding
+      .mockResolvedValueOnce(activeBinding)
+      .mockResolvedValueOnce(null);
+    mocks.ipc.getSticky
+      .mockResolvedValueOnce(sticky(0))
+      .mockResolvedValue(sticky(1));
+    mocks.ipc.unbindNoteFromWindow.mockRejectedValueOnce(
+      "runtime pin restoration failed",
+    );
+    render(<StickyPage stickyId={STICKY_ID} />);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: /已绑定到 Chrome：Project Alpha/,
+      }),
+    );
+
+    fireEvent.click(screen.getByRole("menuitem", { name: "取消绑定" }));
+
+    const restoredPin = await screen.findByRole("button", {
+      name: "已置顶（点击取消）",
+    });
+    expect(restoredPin).toBeEnabled();
+    expect(
+      screen.getByRole("button", {
+        name: "绑定到窗口，状态自动更新暂不可用",
+      }),
+    ).toBeVisible();
+    expect(screen.queryByText("取消绑定失败，请重试。")).toBeNull();
+    errorSpy.mockRestore();
+  });
 });
