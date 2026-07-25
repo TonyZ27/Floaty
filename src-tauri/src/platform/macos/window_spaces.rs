@@ -1,4 +1,6 @@
+use std::collections::HashMap;
 use std::ffi::c_void;
+use std::sync::Mutex;
 
 use libloading::Library;
 use objc2::runtime::AnyObject;
@@ -16,23 +18,33 @@ const UNAVAILABLE: &str = "native window-space attachment unavailable";
 
 type MainConnectionId = unsafe extern "C" fn() -> u32;
 type CopySpacesForWindows = unsafe extern "C" fn(u32, i32, *const c_void) -> *mut c_void;
-type MoveWindowsToManagedSpace = unsafe extern "C" fn(u32, *const c_void, u64) -> i32;
+type MoveWindowsToManagedSpace = unsafe extern "C" fn(u32, *const c_void, u64);
 type OrderWindow = unsafe extern "C" fn(u32, u32, i32, u32) -> i32;
 
+/// A receipt that verifies the Note's immediate managed-Space placement.
+///
+/// It does not prove that macOS will carry the Note into a later full-screen
+/// Space with the target. That behavior remains part of the mandatory manual gate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WindowAttachment {
     pub target_window_id: u32,
     pub note_window_id: u32,
     pub target_space_id: u64,
     pub note_space_id: u64,
+    pub note_space_before_attach: u64,
+    pub move_was_observable: bool,
 }
 
 impl WindowAttachment {
-    pub fn is_same_space(&self) -> bool {
+    pub fn placement_verified(&self) -> bool {
         self.target_space_id != 0 && self.target_space_id == self.note_space_id
     }
 }
 
+/// Native window-Space operations.
+///
+/// Every method must be called from the macOS main thread. Calls from another
+/// thread fail with `native window-space attachment unavailable`.
 pub trait WindowSpaceBackend: Send + Sync {
     fn attach(&self, target_window_id: u32, note_window_id: u32) -> AppResult<WindowAttachment>;
     fn detach(&self, note_window_id: u32) -> AppResult<()>;
@@ -40,11 +52,23 @@ pub trait WindowSpaceBackend: Send + Sync {
     fn order_front(&self, target_window_id: u32, note_window_id: u32) -> AppResult<()>;
 }
 
-#[derive(Debug, Default, Clone, Copy)]
-pub struct MacOSWindowSpaceBackend;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OriginalWindowState {
+    space_id: u64,
+    collection_behavior: usize,
+}
+
+/// Keep one backend instance alive for the lifetime of active attachments so
+/// `detach` can restore each Note's pre-binding Space and collection behavior.
+#[derive(Debug, Default)]
+pub struct MacOSWindowSpaceBackend {
+    original_states: Mutex<HashMap<u32, OriginalWindowState>>,
+}
 
 impl WindowSpaceBackend for MacOSWindowSpaceBackend {
     fn attach(&self, target_window_id: u32, note_window_id: u32) -> AppResult<WindowAttachment> {
+        // SAFETY: this checks a scalar AppKit thread property before native work.
+        unsafe { require_main_thread()? };
         unavailable_if_zero(target_window_id)?;
         unavailable_if_zero(note_window_id)?;
 
@@ -53,39 +77,82 @@ impl WindowSpaceBackend for MacOSWindowSpaceBackend {
         unsafe {
             let sky_light = SkyLight::load()?;
             let connection = sky_light.connection()?;
-            let target_space_id = sky_light.space_for_window(connection, target_window_id)?;
-            sky_light.space_for_window(connection, note_window_id)?;
+            let target_space_id =
+                sky_light.single_space_for_window(connection, target_window_id)?;
+            let note_space_before_attach =
+                sky_light.single_space_for_window(connection, note_window_id)?;
 
-            set_note_collection_behavior(note_window_id, true)?;
-            sky_light.move_window(connection, note_window_id, target_space_id)?;
-            sky_light.order_window(connection, note_window_id, ORDER_ABOVE, target_window_id)?;
-
-            let target_space_id = sky_light.space_for_window(connection, target_window_id)?;
-            let note_space_id = sky_light.space_for_window(connection, note_window_id)?;
-            let attachment = WindowAttachment {
-                target_window_id,
-                note_window_id,
-                target_space_id,
-                note_space_id,
+            let saved_origin = self.original_state(note_window_id)?;
+            let original_collection_behavior = set_note_collection_behavior(note_window_id, true)?;
+            let rollback_state = OriginalWindowState {
+                space_id: note_space_before_attach,
+                collection_behavior: original_collection_behavior,
             };
+            let binding_origin = saved_origin.unwrap_or(rollback_state);
+            let result = (|| {
+                sky_light.move_window(connection, note_window_id, target_space_id)?;
+                sky_light.order_window(
+                    connection,
+                    note_window_id,
+                    ORDER_ABOVE,
+                    target_window_id,
+                )?;
 
-            if !attachment.is_same_space() {
+                let target_space_id =
+                    sky_light.single_space_for_window(connection, target_window_id)?;
+                let note_space_id =
+                    sky_light.single_space_for_window(connection, note_window_id)?;
+                let attachment = WindowAttachment {
+                    target_window_id,
+                    note_window_id,
+                    target_space_id,
+                    note_space_id,
+                    note_space_before_attach,
+                    move_was_observable: note_space_before_attach != note_space_id,
+                };
+
+                if !attachment.placement_verified() {
+                    return Err(unavailable());
+                }
+
+                Ok(attachment)
+            })();
+
+            if result.is_err() {
+                let _ = sky_light.restore_window_state(connection, note_window_id, rollback_state);
+            } else if self
+                .remember_original_state(note_window_id, binding_origin)
+                .is_err()
+            {
+                let _ = sky_light.restore_window_state(connection, note_window_id, rollback_state);
                 return Err(unavailable());
             }
 
-            Ok(attachment)
+            result
         }
     }
 
     fn detach(&self, note_window_id: u32) -> AppResult<()> {
+        // SAFETY: this checks a scalar AppKit thread property before native work.
+        unsafe { require_main_thread()? };
         unavailable_if_zero(note_window_id)?;
 
-        // SAFETY: the note window is resolved from NSApplication's live windows and
-        // no Objective-C pointer leaves this module.
-        unsafe { set_note_collection_behavior(note_window_id, false) }
+        // SAFETY: native pointers remain inside this module, and Space restoration
+        // is verified before the runtime restoration token is removed.
+        unsafe {
+            let original_state = self
+                .original_state(note_window_id)?
+                .ok_or_else(unavailable)?;
+            let sky_light = SkyLight::load()?;
+            let connection = sky_light.connection()?;
+            sky_light.restore_window_state(connection, note_window_id, original_state)?;
+            self.forget_original_state(note_window_id)
+        }
     }
 
     fn order_out(&self, note_window_id: u32) -> AppResult<()> {
+        // SAFETY: this checks a scalar AppKit thread property before native work.
+        unsafe { require_main_thread()? };
         unavailable_if_zero(note_window_id)?;
 
         // SAFETY: dynamically resolved function pointers are invoked while their
@@ -98,6 +165,8 @@ impl WindowSpaceBackend for MacOSWindowSpaceBackend {
     }
 
     fn order_front(&self, target_window_id: u32, note_window_id: u32) -> AppResult<()> {
+        // SAFETY: this checks a scalar AppKit thread property before native work.
+        unsafe { require_main_thread()? };
         unavailable_if_zero(target_window_id)?;
         unavailable_if_zero(note_window_id)?;
 
@@ -108,6 +177,37 @@ impl WindowSpaceBackend for MacOSWindowSpaceBackend {
             let connection = sky_light.connection()?;
             sky_light.order_window(connection, note_window_id, ORDER_ABOVE, target_window_id)
         }
+    }
+}
+
+impl MacOSWindowSpaceBackend {
+    fn original_state(&self, note_window_id: u32) -> AppResult<Option<OriginalWindowState>> {
+        self.original_states
+            .lock()
+            .map(|states| states.get(&note_window_id).copied())
+            .map_err(|_| unavailable())
+    }
+
+    fn remember_original_state(
+        &self,
+        note_window_id: u32,
+        state: OriginalWindowState,
+    ) -> AppResult<()> {
+        self.original_states
+            .lock()
+            .map(|mut states| {
+                states.entry(note_window_id).or_insert(state);
+            })
+            .map_err(|_| unavailable())
+    }
+
+    fn forget_original_state(&self, note_window_id: u32) -> AppResult<()> {
+        self.original_states
+            .lock()
+            .map(|mut states| {
+                states.remove(&note_window_id);
+            })
+            .map_err(|_| unavailable())
     }
 }
 
@@ -185,7 +285,7 @@ impl SkyLight {
         Ok(connection)
     }
 
-    unsafe fn space_for_window(&self, connection: u32, window_id: u32) -> AppResult<u64> {
+    unsafe fn spaces_for_window(&self, connection: u32, window_id: u32) -> AppResult<Vec<u64>> {
         // SAFETY: the autoreleased NSNumber/NSArray are used only for this call.
         let window_number: *mut AnyObject =
             unsafe { msg_send![class!(NSNumber), numberWithUnsignedInt: window_id] };
@@ -215,20 +315,27 @@ impl SkyLight {
         // SAFETY: the returned CFArray is toll-free bridged to NSArray and contains
         // managed Space IDs represented as NSNumber values.
         let count: usize = unsafe { msg_send![spaces, count] };
-        let space_id = if count == 0 {
-            0
-        } else {
-            let number: *mut AnyObject = unsafe { msg_send![spaces, objectAtIndex: 0usize] };
-            if number.is_null() {
+        let mut space_ids = Vec::with_capacity(count);
+        for index in 0..count {
+            let number: *mut AnyObject = unsafe { msg_send![spaces, objectAtIndex: index] };
+            let space_id = if number.is_null() {
                 0
             } else {
                 unsafe { msg_send![number, unsignedLongLongValue] }
-            }
-        };
+            };
+            space_ids.push(space_id);
+        }
         let _: () = unsafe { msg_send![spaces, release] };
 
-        unavailable_if_zero(space_id)?;
-        Ok(space_id)
+        if space_ids.is_empty() || space_ids.iter().any(|space_id| *space_id == 0) {
+            return Err(unavailable());
+        }
+        Ok(space_ids)
+    }
+
+    unsafe fn single_space_for_window(&self, connection: u32, window_id: u32) -> AppResult<u64> {
+        let spaces = unsafe { self.spaces_for_window(connection, window_id)? };
+        only_space(&spaces)
     }
 
     unsafe fn move_window(&self, connection: u32, window_id: u32, space_id: u64) -> AppResult<()> {
@@ -244,10 +351,38 @@ impl SkyLight {
         if windows.is_null() {
             return Err(unavailable());
         }
-        let result = unsafe {
+        // SAFETY: this SkyLight function has a void ABI. A silent failure is detected
+        // by `attach` reading the Note's managed Space back after this call.
+        unsafe {
             (self.move_windows_to_managed_space)(connection, windows.cast::<c_void>(), space_id)
         };
-        success_or_unavailable(result)
+        Ok(())
+    }
+
+    unsafe fn restore_window_state(
+        &self,
+        connection: u32,
+        window_id: u32,
+        state: OriginalWindowState,
+    ) -> AppResult<()> {
+        let placement_result = match unsafe {
+            self.move_window(connection, window_id, state.space_id)
+        } {
+            Ok(()) => {
+                let restored_space = unsafe { self.single_space_for_window(connection, window_id) };
+                match restored_space {
+                    Ok(space_id) if space_id == state.space_id => Ok(()),
+                    _ => Err(unavailable()),
+                }
+            }
+            Err(error) => Err(error),
+        };
+
+        // Restore AppKit behavior even when the private Space move silently fails.
+        let behavior_result =
+            unsafe { restore_note_collection_behavior(window_id, state.collection_behavior) };
+        placement_result?;
+        behavior_result
     }
 
     unsafe fn order_window(
@@ -264,7 +399,30 @@ impl SkyLight {
     }
 }
 
-unsafe fn set_note_collection_behavior(window_id: u32, attached: bool) -> AppResult<()> {
+unsafe fn set_note_collection_behavior(window_id: u32, attached: bool) -> AppResult<usize> {
+    unsafe {
+        update_note_collection_behavior(window_id, |behavior| {
+            if attached {
+                (behavior & !COLLECTION_BEHAVIOR_CAN_JOIN_ALL_SPACES)
+                    | COLLECTION_BEHAVIOR_FULL_SCREEN_AUXILIARY
+            } else {
+                behavior & !COLLECTION_BEHAVIOR_FULL_SCREEN_AUXILIARY
+            }
+        })
+    }
+}
+
+unsafe fn restore_note_collection_behavior(
+    window_id: u32,
+    collection_behavior: usize,
+) -> AppResult<()> {
+    unsafe { update_note_collection_behavior(window_id, |_| collection_behavior).map(|_| ()) }
+}
+
+unsafe fn update_note_collection_behavior<F>(window_id: u32, update: F) -> AppResult<usize>
+where
+    F: FnOnce(usize) -> usize,
+{
     unsafe { require_main_thread()? };
 
     // SAFETY: NSApplication is already initialized by Tauri. The returned arrays and
@@ -290,15 +448,10 @@ unsafe fn set_note_collection_behavior(window_id: u32, attached: bool) -> AppRes
             continue;
         }
 
-        let behavior: usize = unsafe { msg_send![window, collectionBehavior] };
-        let behavior = if attached {
-            (behavior & !COLLECTION_BEHAVIOR_CAN_JOIN_ALL_SPACES)
-                | COLLECTION_BEHAVIOR_FULL_SCREEN_AUXILIARY
-        } else {
-            behavior & !COLLECTION_BEHAVIOR_FULL_SCREEN_AUXILIARY
-        };
-        let _: () = unsafe { msg_send![window, setCollectionBehavior: behavior] };
-        return Ok(());
+        let previous_behavior: usize = unsafe { msg_send![window, collectionBehavior] };
+        let next_behavior = update(previous_behavior);
+        let _: () = unsafe { msg_send![window, setCollectionBehavior: next_behavior] };
+        return Ok(previous_behavior);
     }
 
     Err(unavailable())
@@ -311,6 +464,13 @@ unsafe fn require_main_thread() -> AppResult<()> {
         Ok(())
     } else {
         Err(unavailable())
+    }
+}
+
+fn only_space(space_ids: &[u64]) -> AppResult<u64> {
+    match space_ids {
+        [space_id] if *space_id != 0 => Ok(*space_id),
+        _ => Err(unavailable()),
     }
 }
 
@@ -341,29 +501,61 @@ fn unavailable() -> AppError {
 mod tests {
     use super::*;
 
+    fn placement(
+        target_space_id: u64,
+        note_space_id: u64,
+        note_space_before_attach: u64,
+    ) -> WindowAttachment {
+        WindowAttachment {
+            target_window_id: 10,
+            note_window_id: 20,
+            target_space_id,
+            note_space_id,
+            note_space_before_attach,
+            move_was_observable: note_space_before_attach != note_space_id,
+        }
+    }
+
     #[test]
-    fn attachment_only_passes_for_the_same_nonzero_space() {
-        assert!(WindowAttachment {
-            target_window_id: 10,
-            note_window_id: 20,
-            target_space_id: 30,
-            note_space_id: 30,
-        }
-        .is_same_space());
-        assert!(!WindowAttachment {
-            target_window_id: 10,
-            note_window_id: 20,
-            target_space_id: 30,
-            note_space_id: 31,
-        }
-        .is_same_space());
-        assert!(!WindowAttachment {
-            target_window_id: 10,
-            note_window_id: 20,
-            target_space_id: 0,
-            note_space_id: 0,
-        }
-        .is_same_space());
+    fn placement_requires_the_same_nonzero_space() {
+        assert!(placement(30, 30, 20).placement_verified());
+        assert!(!placement(30, 31, 20).placement_verified());
+        assert!(!placement(0, 0, 20).placement_verified());
+    }
+
+    #[test]
+    fn preexisting_same_space_is_not_reported_as_an_observable_move() {
+        let receipt = placement(30, 30, 30);
+        assert!(receipt.placement_verified());
+        assert!(!receipt.move_was_observable);
+    }
+
+    #[test]
+    fn multi_space_windows_are_rejected() {
+        assert_eq!(only_space(&[30]).unwrap(), 30);
+        assert!(only_space(&[]).is_err());
+        assert!(only_space(&[0]).is_err());
+        assert!(only_space(&[30, 31]).is_err());
+    }
+
+    #[test]
+    fn runtime_restore_token_preserves_the_first_bind_state() {
+        let backend = MacOSWindowSpaceBackend::default();
+        let first = OriginalWindowState {
+            space_id: 30,
+            collection_behavior: 10,
+        };
+        let rebind = OriginalWindowState {
+            space_id: 40,
+            collection_behavior: 20,
+        };
+
+        backend.remember_original_state(20, first).unwrap();
+        backend.remember_original_state(20, rebind).unwrap();
+        assert_eq!(backend.original_state(20).unwrap(), Some(first));
+
+        backend.forget_original_state(20).unwrap();
+        assert_eq!(backend.original_state(20).unwrap(), None);
     }
 
     #[test]
@@ -371,5 +563,10 @@ mod tests {
         // SAFETY: the test only opens the system framework and resolves the four
         // function pointers; it does not invoke a private API.
         assert!(unsafe { SkyLight::load() }.is_ok());
+    }
+
+    #[test]
+    fn silent_move_noop_fails_the_readback_contract() {
+        assert!(!placement(30, 40, 40).placement_verified());
     }
 }
