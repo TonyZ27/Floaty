@@ -15,6 +15,7 @@ const ORDER_ABOVE: i32 = 1;
 const COLLECTION_BEHAVIOR_CAN_JOIN_ALL_SPACES: usize = 1 << 0;
 const COLLECTION_BEHAVIOR_FULL_SCREEN_AUXILIARY: usize = 1 << 8;
 const UNAVAILABLE: &str = "native window-space attachment unavailable";
+const RECOVERY_REQUIRED: &str = "native window-space attachment failed; recovery required";
 
 type MainConnectionId = unsafe extern "C" fn() -> u32;
 type CopySpacesForWindows = unsafe extern "C" fn(u32, i32, *const c_void) -> *mut c_void;
@@ -82,13 +83,17 @@ impl WindowSpaceBackend for MacOSWindowSpaceBackend {
             let note_space_before_attach =
                 sky_light.single_space_for_window(connection, note_window_id)?;
 
-            let saved_origin = self.original_state(note_window_id)?;
+            let saved_origin = self.original_state(note_window_id);
+            let had_existing_token = saved_origin.is_some();
             let original_collection_behavior = set_note_collection_behavior(note_window_id, true)?;
             let rollback_state = OriginalWindowState {
                 space_id: note_space_before_attach,
                 collection_behavior: original_collection_behavior,
             };
             let binding_origin = saved_origin.unwrap_or(rollback_state);
+            // Save recovery state before the first private Space mutation.
+            self.remember_original_state(note_window_id, binding_origin);
+
             let result = (|| {
                 sky_light.move_window(connection, note_window_id, target_space_id)?;
                 sky_light.order_window(
@@ -118,17 +123,23 @@ impl WindowSpaceBackend for MacOSWindowSpaceBackend {
                 Ok(attachment)
             })();
 
-            if result.is_err() {
-                let _ = sky_light.restore_window_state(connection, note_window_id, rollback_state);
-            } else if self
-                .remember_original_state(note_window_id, binding_origin)
-                .is_err()
-            {
-                let _ = sky_light.restore_window_state(connection, note_window_id, rollback_state);
-                return Err(unavailable());
-            }
+            match result {
+                Ok(attachment) => Ok(attachment),
+                Err(forward_error) => {
+                    let rollback_succeeded = sky_light
+                        .restore_window_state(connection, note_window_id, rollback_state)
+                        .is_ok();
+                    if !should_keep_recovery_token(had_existing_token, rollback_succeeded) {
+                        self.forget_original_state(note_window_id);
+                    }
 
-            result
+                    if rollback_succeeded {
+                        Err(forward_error)
+                    } else {
+                        Err(recovery_required())
+                    }
+                }
+            }
         }
     }
 
@@ -141,12 +152,13 @@ impl WindowSpaceBackend for MacOSWindowSpaceBackend {
         // is verified before the runtime restoration token is removed.
         unsafe {
             let original_state = self
-                .original_state(note_window_id)?
+                .original_state(note_window_id)
                 .ok_or_else(unavailable)?;
             let sky_light = SkyLight::load()?;
             let connection = sky_light.connection()?;
             sky_light.restore_window_state(connection, note_window_id, original_state)?;
-            self.forget_original_state(note_window_id)
+            self.forget_original_state(note_window_id);
+            Ok(())
         }
     }
 
@@ -181,33 +193,27 @@ impl WindowSpaceBackend for MacOSWindowSpaceBackend {
 }
 
 impl MacOSWindowSpaceBackend {
-    fn original_state(&self, note_window_id: u32) -> AppResult<Option<OriginalWindowState>> {
+    fn original_state(&self, note_window_id: u32) -> Option<OriginalWindowState> {
         self.original_states
             .lock()
-            .map(|states| states.get(&note_window_id).copied())
-            .map_err(|_| unavailable())
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&note_window_id)
+            .copied()
     }
 
-    fn remember_original_state(
-        &self,
-        note_window_id: u32,
-        state: OriginalWindowState,
-    ) -> AppResult<()> {
+    fn remember_original_state(&self, note_window_id: u32, state: OriginalWindowState) {
         self.original_states
             .lock()
-            .map(|mut states| {
-                states.entry(note_window_id).or_insert(state);
-            })
-            .map_err(|_| unavailable())
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entry(note_window_id)
+            .or_insert(state);
     }
 
-    fn forget_original_state(&self, note_window_id: u32) -> AppResult<()> {
+    fn forget_original_state(&self, note_window_id: u32) {
         self.original_states
             .lock()
-            .map(|mut states| {
-                states.remove(&note_window_id);
-            })
-            .map_err(|_| unavailable())
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&note_window_id);
     }
 }
 
@@ -474,6 +480,10 @@ fn only_space(space_ids: &[u64]) -> AppResult<u64> {
     }
 }
 
+fn should_keep_recovery_token(had_existing_token: bool, rollback_succeeded: bool) -> bool {
+    had_existing_token || !rollback_succeeded
+}
+
 fn success_or_unavailable(code: i32) -> AppResult<()> {
     if code == 0 {
         Ok(())
@@ -495,6 +505,10 @@ where
 
 fn unavailable() -> AppError {
     AppError::Other(UNAVAILABLE.to_owned())
+}
+
+fn recovery_required() -> AppError {
+    AppError::Other(RECOVERY_REQUIRED.to_owned())
 }
 
 #[cfg(test)]
@@ -550,12 +564,24 @@ mod tests {
             collection_behavior: 20,
         };
 
-        backend.remember_original_state(20, first).unwrap();
-        backend.remember_original_state(20, rebind).unwrap();
-        assert_eq!(backend.original_state(20).unwrap(), Some(first));
+        backend.remember_original_state(20, first);
+        backend.remember_original_state(20, rebind);
+        assert_eq!(backend.original_state(20), Some(first));
 
-        backend.forget_original_state(20).unwrap();
-        assert_eq!(backend.original_state(20).unwrap(), None);
+        backend.forget_original_state(20);
+        assert_eq!(backend.original_state(20), None);
+    }
+
+    #[test]
+    fn rollback_failure_preserves_a_recovery_token() {
+        assert!(should_keep_recovery_token(false, false));
+        assert!(should_keep_recovery_token(true, false));
+        assert!(should_keep_recovery_token(true, true));
+        assert!(!should_keep_recovery_token(false, true));
+        assert_eq!(
+            recovery_required().to_string(),
+            "native window-space attachment failed; recovery required"
+        );
     }
 
     #[test]
