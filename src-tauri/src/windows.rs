@@ -130,6 +130,33 @@ pub async fn show(app: &AppHandle, sticky_id: &str, db: &Db) -> AppResult<Webvie
     open(app, &sticky).await
 }
 
+/// Restores a bound Note's runtime position without changing its persisted
+/// manual-hidden flag. The coordinator commits that flag only after native
+/// target validation and attachment have succeeded.
+pub async fn reveal_for_binding(
+    app: &AppHandle,
+    sticky_id: &str,
+    db: &Db,
+) -> AppResult<WebviewWindow> {
+    let sticky = db::stickies::get(db, sticky_id).await?;
+    if let Some(window) = app.get_webview_window(&label(sticky_id)) {
+        let (x, y) = match (sticky.x, sticky.y) {
+            (Some(x), Some(y)) => sanitize_position(x, y).unwrap_or((200, 200)),
+            _ => (200, 200),
+        };
+        window
+            .set_position(tauri::LogicalPosition::new(x as f64, y as f64))
+            .map_err(|error| {
+                AppError::Other(format!("window set_position binding restore: {error}"))
+            })?;
+        window
+            .set_always_on_top(false)
+            .map_err(|error| AppError::Other(format!("disable global pinning: {error}")))?;
+        return Ok(window);
+    }
+    open(app, &sticky).await
+}
+
 /// 切换 always-on-top。返回新的 pinned 状态。
 pub async fn toggle_pin(app: &AppHandle, sticky_id: &str, db: &Db) -> AppResult<bool> {
     let s = db::stickies::get(db, sticky_id).await?;

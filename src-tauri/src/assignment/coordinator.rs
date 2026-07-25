@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
@@ -23,6 +24,7 @@ pub trait BindingRepository: Send + Sync {
     ) -> AppResult<WindowBinding>;
     async fn unbind(&self, sticky_id: &str) -> AppResult<Option<WindowBinding>>;
     async fn manually_hidden(&self, sticky_id: &str) -> AppResult<bool>;
+    async fn set_manually_hidden(&self, sticky_id: &str, hidden: bool) -> AppResult<()>;
 }
 
 #[async_trait]
@@ -90,11 +92,17 @@ struct CoordinatorInner {
     native: Arc<dyn NativeWindowRuntime>,
     windows: Arc<dyn NoteWindowRuntime>,
     observers: Arc<dyn ObserverFactory>,
-    active_observers: Mutex<HashMap<String, Box<dyn ObserverRegistration>>>,
+    active_observers: Mutex<HashMap<String, ActiveObserver>>,
+    next_observer_generation: AtomicU64,
     runtime_states: Mutex<HashMap<String, RuntimeState>>,
     attached_notes: Mutex<HashSet<String>>,
     event_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     retry: RetryPolicy,
+}
+
+struct ActiveObserver {
+    generation: u64,
+    registration: Box<dyn ObserverRegistration>,
 }
 
 impl BindingCoordinator {
@@ -131,6 +139,7 @@ impl BindingCoordinator {
                 windows,
                 observers,
                 active_observers: Mutex::new(HashMap::new()),
+                next_observer_generation: AtomicU64::new(1),
                 runtime_states: Mutex::new(HashMap::new()),
                 attached_notes: Mutex::new(HashSet::new()),
                 event_locks: Mutex::new(HashMap::new()),
@@ -155,8 +164,8 @@ impl BindingCoordinator {
             return Err(AppError::Other(TARGET_UNAVAILABLE.into()));
         }
 
-        self.stop_observer(sticky_id).await?;
         let previous_binding = self.inner.repository.binding(sticky_id).await?;
+        self.stop_observer(sticky_id).await?;
         if previous_binding
             .as_ref()
             .and_then(|binding| binding.runtime_window_id)
@@ -164,20 +173,25 @@ impl BindingCoordinator {
             || self.is_attached(sticky_id)
         {
             if let Err(error) = self.detach(sticky_id).await {
-                self.degrade_binding(sticky_id).await?;
+                if let Some(previous) = previous_binding.as_ref() {
+                    self.restore_previous_or_degrade(sticky_id, previous)
+                        .await?;
+                }
                 return Err(error);
             }
         }
 
         if let Err(error) = self.inner.windows.ensure_open(sticky_id).await {
-            if previous_binding.is_some() {
-                self.degrade_binding(sticky_id).await?;
+            if let Some(previous) = previous_binding.as_ref() {
+                self.restore_previous_or_degrade(sticky_id, previous)
+                    .await?;
             }
             return Err(error);
         }
         if let Err(error) = self.inner.windows.enter_bound_mode(sticky_id).await {
-            if previous_binding.is_some() {
-                self.degrade_binding(sticky_id).await?;
+            if let Some(previous) = previous_binding.as_ref() {
+                self.restore_previous_or_degrade(sticky_id, previous)
+                    .await?;
             } else {
                 let _ = self.inner.windows.restore_unbound_pinning(sticky_id).await;
             }
@@ -185,16 +199,9 @@ impl BindingCoordinator {
         }
         if let Err(error) = self.inner.native.attach(sticky_id, target.window_id).await {
             let _ = self.detach(sticky_id).await;
-            if previous_binding.is_some() {
-                if let Ok(updated) = self
-                    .inner
-                    .repository
-                    .set_state(sticky_id, BindingState::Unavailable, true)
-                    .await
-                {
-                    let _ = self.inner.windows.binding_changed(&updated).await;
-                }
-                self.set_runtime_state(sticky_id, RuntimeState::Unavailable);
+            if let Some(previous) = previous_binding.as_ref() {
+                self.restore_previous_or_degrade(sticky_id, previous)
+                    .await?;
             } else {
                 let _ = self.inner.windows.restore_unbound_pinning(sticky_id).await;
             }
@@ -208,16 +215,9 @@ impl BindingCoordinator {
             Ok(binding) => binding,
             Err(error) => {
                 let _ = self.detach(sticky_id).await;
-                if previous_binding.is_some() {
-                    if let Ok(updated) = self
-                        .inner
-                        .repository
-                        .set_state(sticky_id, BindingState::Unavailable, true)
-                        .await
-                    {
-                        let _ = self.inner.windows.binding_changed(&updated).await;
-                    }
-                    self.set_runtime_state(sticky_id, RuntimeState::Unavailable);
+                if let Some(previous) = previous_binding.as_ref() {
+                    self.restore_previous_or_degrade(sticky_id, previous)
+                        .await?;
                 } else {
                     let _ = self.inner.windows.restore_unbound_pinning(sticky_id).await;
                 }
@@ -252,23 +252,25 @@ impl BindingCoordinator {
     pub async fn unbind(&self, sticky_id: &str) -> AppResult<()> {
         let event_lock = self.event_lock(sticky_id);
         let _event_guard = event_lock.lock().await;
+        let binding = self.inner.repository.binding(sticky_id).await?;
+        let Some(binding) = binding else {
+            self.inner
+                .windows
+                .restore_unbound_pinning(sticky_id)
+                .await?;
+            return Ok(());
+        };
         self.stop_observer(sticky_id).await?;
-        if self
-            .inner
-            .repository
-            .binding(sticky_id)
-            .await?
-            .and_then(|binding| binding.runtime_window_id)
-            .is_some()
-            || self.is_attached(sticky_id)
-        {
+        if binding.runtime_window_id.is_some() || self.is_attached(sticky_id) {
             if let Err(error) = self.detach(sticky_id).await {
-                self.degrade_binding(sticky_id).await?;
+                self.restore_previous_or_degrade(sticky_id, &binding)
+                    .await?;
                 return Err(error);
             }
         }
         if let Err(error) = self.inner.repository.unbind(sticky_id).await {
-            self.degrade_binding(sticky_id).await?;
+            self.restore_previous_or_degrade(sticky_id, &binding)
+                .await?;
             return Err(error);
         }
         self.inner
@@ -286,18 +288,18 @@ impl BindingCoordinator {
     pub async fn prepare_delete(&self, sticky_id: &str) -> AppResult<()> {
         let event_lock = self.event_lock(sticky_id);
         let _event_guard = event_lock.lock().await;
-        self.stop_observer(sticky_id).await?;
-        if self
-            .inner
-            .repository
-            .binding(sticky_id)
-            .await?
+        let binding = self.inner.repository.binding(sticky_id).await?;
+        let should_detach = binding
+            .as_ref()
             .and_then(|binding| binding.runtime_window_id)
             .is_some()
-            || self.is_attached(sticky_id)
-        {
+            || self.is_attached(sticky_id);
+        if binding.is_some() {
+            self.degrade_binding(sticky_id).await?;
+        }
+        self.stop_observer(sticky_id).await?;
+        if should_detach {
             if let Err(error) = self.detach(sticky_id).await {
-                self.degrade_binding(sticky_id).await?;
                 return Err(error);
             }
         }
@@ -318,17 +320,48 @@ impl BindingCoordinator {
             .binding(sticky_id)
             .await?
             .ok_or(AppError::NotFound)?;
+        if binding.state != BindingState::Active {
+            return Err(AppError::Other(TARGET_UNAVAILABLE.into()));
+        }
+        let current = self.runtime_state(sticky_id, &binding).await?;
+        if current == RuntimeState::SuspendedManuallyHidden {
+            self.inner
+                .repository
+                .set_manually_hidden(sticky_id, false)
+                .await?;
+            self.set_runtime_state(sticky_id, RuntimeState::Suspended);
+            return Ok(binding);
+        }
+        if current != RuntimeState::ManuallyHidden {
+            return Ok(binding);
+        }
+        let pid = active_pid(&binding)?;
         let target_window_id = active_window_id(&binding)?;
-        self.inner.windows.reopen(sticky_id).await?;
-        self.inner
-            .native
-            .attach(sticky_id, target_window_id)
-            .await?;
+        if !self.inner.catalog.contains(pid, target_window_id).await? {
+            return Err(AppError::Other(TARGET_UNAVAILABLE.into()));
+        }
+        if let Err(error) = self.inner.native.attach(sticky_id, target_window_id).await {
+            self.transition_unavailable(sticky_id).await?;
+            return Err(error);
+        }
         self.mark_attached(sticky_id);
-        self.inner
-            .native
-            .resume(sticky_id, target_window_id)
-            .await?;
+        if let Err(error) = self.inner.native.resume(sticky_id, target_window_id).await {
+            self.transition_unavailable(sticky_id).await?;
+            return Err(error);
+        }
+        if let Err(error) = self.inner.windows.reopen(sticky_id).await {
+            let _ = self.inner.native.suspend(sticky_id).await;
+            return Err(error);
+        }
+        if let Err(error) = self
+            .inner
+            .repository
+            .set_manually_hidden(sticky_id, false)
+            .await
+        {
+            let _ = self.inner.native.suspend(sticky_id).await;
+            return Err(error);
+        }
         self.set_runtime_state(sticky_id, RuntimeState::Visible);
         Ok(binding)
     }
@@ -336,6 +369,10 @@ impl BindingCoordinator {
     pub async fn handle(&self, sticky_id: &str, event: BindingEvent) -> AppResult<()> {
         let event_lock = self.event_lock(sticky_id);
         let _event_guard = event_lock.lock().await;
+        self.handle_locked(sticky_id, event).await
+    }
+
+    async fn handle_locked(&self, sticky_id: &str, event: BindingEvent) -> AppResult<()> {
         let binding = self
             .inner
             .repository
@@ -364,19 +401,19 @@ impl BindingCoordinator {
                 }
             }
             BindingEvent::TargetClosed => {
+                let updated = self
+                    .inner
+                    .repository
+                    .set_state(sticky_id, BindingState::TargetClosed, true)
+                    .await?;
+                self.set_runtime_state(sticky_id, RuntimeState::TargetClosed);
                 let cleanup_error = self.stop_observer(sticky_id).await.err().or(self
                     .inner
                     .native
                     .suspend(sticky_id)
                     .await
                     .err());
-                let updated = self
-                    .inner
-                    .repository
-                    .set_state(sticky_id, BindingState::TargetClosed, true)
-                    .await?;
                 self.inner.windows.binding_changed(&updated).await?;
-                self.set_runtime_state(sticky_id, RuntimeState::TargetClosed);
                 if let Some(error) = cleanup_error {
                     return Err(error);
                 }
@@ -392,19 +429,19 @@ impl BindingCoordinator {
                 return Ok(());
             }
             BindingEvent::PermissionRevoked => {
+                let updated = self
+                    .inner
+                    .repository
+                    .set_state(sticky_id, BindingState::Unavailable, true)
+                    .await?;
+                self.set_runtime_state(sticky_id, RuntimeState::Unavailable);
                 let cleanup_error = self.stop_observer(sticky_id).await.err().or(self
                     .inner
                     .native
                     .suspend(sticky_id)
                     .await
                     .err());
-                let updated = self
-                    .inner
-                    .repository
-                    .set_state(sticky_id, BindingState::Unavailable, true)
-                    .await?;
                 self.inner.windows.binding_changed(&updated).await?;
-                self.set_runtime_state(sticky_id, RuntimeState::Unavailable);
                 if let Some(error) = cleanup_error {
                     return Err(error);
                 }
@@ -449,18 +486,27 @@ impl BindingCoordinator {
             }
         }
 
-        let cleanup_error = self.stop_observer(sticky_id).await.err();
         let updated = self
             .inner
             .repository
             .set_state(sticky_id, BindingState::Unavailable, true)
             .await?;
-        self.inner.windows.binding_changed(&updated).await?;
         self.set_runtime_state(sticky_id, RuntimeState::Unavailable);
+        let cleanup_error = self.stop_observer(sticky_id).await.err().or(self
+            .inner
+            .native
+            .suspend(sticky_id)
+            .await
+            .err());
+        self.inner.windows.binding_changed(&updated).await?;
         Err(cleanup_error.unwrap_or_else(|| AppError::Other(NATIVE_ATTACHMENT_FAILED.into())))
     }
 
     async fn install_observer(&self, sticky_id: &str, pid: i32, window_id: u32) -> AppResult<()> {
+        let generation = self
+            .inner
+            .next_observer_generation
+            .fetch_add(1, Ordering::Relaxed);
         let weak: Weak<CoordinatorInner> = Arc::downgrade(&self.inner);
         let sticky_id_for_callback = sticky_id.to_owned();
         let callback = Arc::new(move |event| {
@@ -470,7 +516,10 @@ impl BindingCoordinator {
             let coordinator = BindingCoordinator { inner };
             let sticky_id = sticky_id_for_callback.clone();
             tauri::async_runtime::spawn(async move {
-                if let Err(error) = coordinator.handle(&sticky_id, event).await {
+                if let Err(error) = coordinator
+                    .handle_observed(&sticky_id, generation, event)
+                    .await
+                {
                     eprintln!("[floaty] binding event failed for {}: {}", sticky_id, error);
                 }
             });
@@ -484,8 +533,36 @@ impl BindingCoordinator {
             .active_observers
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(sticky_id.to_owned(), observer);
+            .insert(
+                sticky_id.to_owned(),
+                ActiveObserver {
+                    generation,
+                    registration: observer,
+                },
+            );
         Ok(())
+    }
+
+    async fn handle_observed(
+        &self,
+        sticky_id: &str,
+        generation: u64,
+        event: BindingEvent,
+    ) -> AppResult<()> {
+        let event_lock = self.event_lock(sticky_id);
+        let _event_guard = event_lock.lock().await;
+        let is_current = self
+            .inner
+            .active_observers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(sticky_id)
+            .map(|observer| observer.generation == generation)
+            .unwrap_or(false);
+        if !is_current {
+            return Ok(());
+        }
+        self.handle_locked(sticky_id, event).await
     }
 
     async fn stop_observer(&self, sticky_id: &str) -> AppResult<()> {
@@ -496,7 +573,7 @@ impl BindingCoordinator {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(sticky_id);
         if let Some(mut observer) = observer {
-            if let Err(error) = observer.stop().await {
+            if let Err(error) = observer.registration.stop().await {
                 self.inner
                     .active_observers
                     .lock()
@@ -585,6 +662,54 @@ impl BindingCoordinator {
         self.set_runtime_state(sticky_id, RuntimeState::Unavailable);
         self.inner.windows.binding_changed(&updated).await
     }
+
+    async fn restore_previous_or_degrade(
+        &self,
+        sticky_id: &str,
+        binding: &WindowBinding,
+    ) -> AppResult<()> {
+        if self.restore_previous(sticky_id, binding).await.is_ok() {
+            let state = if self.inner.repository.manually_hidden(sticky_id).await? {
+                RuntimeState::ManuallyHidden
+            } else {
+                RuntimeState::Visible
+            };
+            self.set_runtime_state(sticky_id, state);
+            return Ok(());
+        }
+        self.transition_unavailable(sticky_id).await
+    }
+
+    async fn restore_previous(&self, sticky_id: &str, binding: &WindowBinding) -> AppResult<()> {
+        let pid = active_pid(binding)?;
+        let window_id = active_window_id(binding)?;
+        if !self.inner.catalog.contains(pid, window_id).await? {
+            return Err(AppError::Other(TARGET_UNAVAILABLE.into()));
+        }
+        self.inner.native.attach(sticky_id, window_id).await?;
+        self.mark_attached(sticky_id);
+        self.install_observer(sticky_id, pid, window_id).await
+    }
+
+    async fn transition_unavailable(&self, sticky_id: &str) -> AppResult<()> {
+        let updated = self
+            .inner
+            .repository
+            .set_state(sticky_id, BindingState::Unavailable, true)
+            .await?;
+        self.set_runtime_state(sticky_id, RuntimeState::Unavailable);
+        let cleanup_error = self.stop_observer(sticky_id).await.err().or(self
+            .inner
+            .native
+            .suspend(sticky_id)
+            .await
+            .err());
+        self.inner.windows.binding_changed(&updated).await?;
+        if let Some(error) = cleanup_error {
+            return Err(error);
+        }
+        Ok(())
+    }
 }
 
 fn active_pid(binding: &WindowBinding) -> AppResult<i32> {
@@ -654,6 +779,19 @@ impl BindingRepository for DbBindingRepository {
 
     async fn manually_hidden(&self, sticky_id: &str) -> AppResult<bool> {
         Ok(crate::db::stickies::get(&self.db, sticky_id).await?.hidden == 1)
+    }
+
+    async fn set_manually_hidden(&self, sticky_id: &str, hidden: bool) -> AppResult<()> {
+        crate::db::stickies::update(
+            &self.db,
+            sticky_id,
+            crate::db::stickies::StickyPatch {
+                hidden: Some(i64::from(hidden)),
+                ..Default::default()
+            },
+        )
+        .await?;
+        Ok(())
     }
 }
 
@@ -792,7 +930,7 @@ impl NoteWindowRuntime for TauriNoteWindowRuntime {
     }
 
     async fn reopen(&self, sticky_id: &str) -> AppResult<()> {
-        crate::windows::show(&self.app, sticky_id, &self.db).await?;
+        crate::windows::reveal_for_binding(&self.app, sticky_id, &self.db).await?;
         Ok(())
     }
 
@@ -858,6 +996,8 @@ mod tests {
         binding: Mutex<Option<WindowBinding>>,
         hidden: AtomicBool,
         fail_unbind: AtomicBool,
+        fail_set_state: AtomicBool,
+        fail_set_hidden: AtomicBool,
     }
 
     impl FakeRepository {
@@ -866,6 +1006,8 @@ mod tests {
                 binding: Mutex::new(Some(test_binding())),
                 hidden: AtomicBool::new(hidden),
                 fail_unbind: AtomicBool::new(false),
+                fail_set_state: AtomicBool::new(false),
+                fail_set_hidden: AtomicBool::new(false),
             }
         }
     }
@@ -894,6 +1036,9 @@ mod tests {
             state: BindingState,
             clear_runtime_identity: bool,
         ) -> AppResult<WindowBinding> {
+            if self.fail_set_state.swap(false, Ordering::SeqCst) {
+                return Err(AppError::Other("set state failed".into()));
+            }
             let mut guard = self.binding.lock().unwrap();
             let binding = guard.as_mut().ok_or(AppError::NotFound)?;
             binding.state = state;
@@ -913,6 +1058,14 @@ mod tests {
 
         async fn manually_hidden(&self, _sticky_id: &str) -> AppResult<bool> {
             Ok(self.hidden.load(Ordering::SeqCst))
+        }
+
+        async fn set_manually_hidden(&self, _sticky_id: &str, hidden: bool) -> AppResult<()> {
+            if self.fail_set_hidden.swap(false, Ordering::SeqCst) {
+                return Err(AppError::Other("set hidden failed".into()));
+            }
+            self.hidden.store(hidden, Ordering::SeqCst);
+            Ok(())
         }
     }
 
@@ -1016,6 +1169,9 @@ mod tests {
     struct FakeWindows {
         geometry: Mutex<(i64, i64, i64, i64)>,
         reopen_count: Mutex<usize>,
+        restore_pin_count: Mutex<usize>,
+        fail_reopen: AtomicBool,
+        fail_restore_pinning: AtomicBool,
     }
 
     impl Default for FakeWindows {
@@ -1023,6 +1179,9 @@ mod tests {
             Self {
                 geometry: Mutex::new((80, 80, 320, 420)),
                 reopen_count: Mutex::new(0),
+                restore_pin_count: Mutex::new(0),
+                fail_reopen: AtomicBool::new(false),
+                fail_restore_pinning: AtomicBool::new(false),
             }
         }
     }
@@ -1035,7 +1194,11 @@ mod tests {
 
         async fn reopen(&self, _sticky_id: &str) -> AppResult<()> {
             *self.reopen_count.lock().unwrap() += 1;
-            Ok(())
+            if self.fail_reopen.swap(false, Ordering::SeqCst) {
+                Err(AppError::Other("reveal failed".into()))
+            } else {
+                Ok(())
+            }
         }
 
         async fn enter_bound_mode(&self, _sticky_id: &str) -> AppResult<()> {
@@ -1043,7 +1206,12 @@ mod tests {
         }
 
         async fn restore_unbound_pinning(&self, _sticky_id: &str) -> AppResult<()> {
-            Ok(())
+            *self.restore_pin_count.lock().unwrap() += 1;
+            if self.fail_restore_pinning.swap(false, Ordering::SeqCst) {
+                Err(AppError::Other("restore pinning failed".into()))
+            } else {
+                Ok(())
+            }
         }
     }
 
@@ -1300,6 +1468,47 @@ mod tests {
             harness.coordinator.runtime_state_for(STICKY_ID),
             Some(RuntimeState::Unavailable)
         );
+        assert_eq!(
+            *harness.native.calls.lock().unwrap(),
+            vec![NativeCall::Suspend]
+        );
+    }
+
+    #[tokio::test]
+    async fn exhausted_space_retry_keeps_observer_when_terminal_write_fails() {
+        let catalog = Arc::new(FakeCatalog::with_results(vec![
+            Ok(false),
+            Ok(false),
+            Ok(false),
+        ]));
+        let harness = Harness::with_catalog(false, catalog);
+        harness.install_observer().await;
+        harness
+            .repository
+            .fail_set_state
+            .store(true, Ordering::SeqCst);
+
+        assert!(harness
+            .coordinator
+            .handle(STICKY_ID, BindingEvent::TargetSpaceChanged)
+            .await
+            .is_err());
+
+        let binding = harness
+            .repository
+            .binding(STICKY_ID)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(binding.state, BindingState::Active);
+        assert_eq!(binding.runtime_window_id, Some(i64::from(TARGET_WINDOW_ID)));
+        assert!(harness
+            .coordinator
+            .inner
+            .active_observers
+            .lock()
+            .unwrap()
+            .contains_key(STICKY_ID));
         assert!(harness.native.calls.lock().unwrap().is_empty());
     }
 
@@ -1384,6 +1593,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn target_close_does_not_stop_observing_when_durable_transition_fails() {
+        let harness = Harness::active(false);
+        harness.install_observer().await;
+        harness
+            .repository
+            .fail_set_state
+            .store(true, Ordering::SeqCst);
+
+        assert!(harness
+            .coordinator
+            .handle(STICKY_ID, BindingEvent::TargetClosed)
+            .await
+            .is_err());
+
+        let binding = harness
+            .repository
+            .binding(STICKY_ID)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(binding.state, BindingState::Active);
+        assert_eq!(binding.runtime_window_id, Some(i64::from(TARGET_WINDOW_ID)));
+        assert!(harness
+            .coordinator
+            .inner
+            .active_observers
+            .lock()
+            .unwrap()
+            .contains_key(STICKY_ID));
+        assert!(harness.native.calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn permission_loss_is_durable_even_when_order_out_fails() {
         let harness = Harness::active(false);
         harness.native.fail_suspend.store(true, Ordering::SeqCst);
@@ -1429,6 +1671,230 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn queued_event_from_replaced_observer_cannot_mutate_new_binding() {
+        let harness = Harness::active(false);
+        harness.install_observer().await;
+        let old_generation = harness
+            .coordinator
+            .inner
+            .active_observers
+            .lock()
+            .unwrap()
+            .get(STICKY_ID)
+            .unwrap()
+            .generation;
+
+        harness
+            .coordinator
+            .bind(STICKY_ID, descriptor())
+            .await
+            .unwrap();
+        harness.native.calls.lock().unwrap().clear();
+
+        harness
+            .coordinator
+            .handle_observed(STICKY_ID, old_generation, BindingEvent::TargetClosed)
+            .await
+            .unwrap();
+
+        let binding = harness
+            .repository
+            .binding(STICKY_ID)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(binding.state, BindingState::Active);
+        assert_eq!(binding.runtime_window_id, Some(i64::from(TARGET_WINDOW_ID)));
+        assert!(harness.native.calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn prepare_delete_leaves_binding_terminal_before_sticky_delete() {
+        let harness = Harness::active(false);
+        harness.install_observer().await;
+
+        harness.coordinator.prepare_delete(STICKY_ID).await.unwrap();
+
+        let binding = harness
+            .repository
+            .binding(STICKY_ID)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(binding.state, BindingState::Unavailable);
+        assert_eq!(binding.runtime_pid, None);
+        assert_eq!(binding.runtime_window_id, None);
+        assert!(!harness
+            .coordinator
+            .inner
+            .active_observers
+            .lock()
+            .unwrap()
+            .contains_key(STICKY_ID));
+        assert!(!harness.coordinator.is_attached(STICKY_ID));
+    }
+
+    #[tokio::test]
+    async fn reopen_revalidates_exact_target_then_commits_manual_visibility() {
+        let harness = Harness::active(true);
+        harness
+            .coordinator
+            .set_runtime_state(STICKY_ID, RuntimeState::ManuallyHidden);
+
+        harness.coordinator.reopen(STICKY_ID).await.unwrap();
+
+        assert_eq!(
+            *harness.catalog.identities.lock().unwrap(),
+            vec![(TARGET_PID, TARGET_WINDOW_ID)]
+        );
+        assert_eq!(
+            *harness.native.calls.lock().unwrap(),
+            vec![
+                NativeCall::Attach(TARGET_WINDOW_ID),
+                NativeCall::Resume(TARGET_WINDOW_ID)
+            ]
+        );
+        assert_eq!(*harness.windows.reopen_count.lock().unwrap(), 1);
+        assert!(!harness.repository.hidden.load(Ordering::SeqCst));
+        assert_eq!(
+            harness.coordinator.runtime_state_for(STICKY_ID),
+            Some(RuntimeState::Visible)
+        );
+    }
+
+    #[tokio::test]
+    async fn reopening_while_target_is_suspended_only_clears_manual_hide() {
+        let harness = Harness::active(true);
+        harness
+            .coordinator
+            .set_runtime_state(STICKY_ID, RuntimeState::SuspendedManuallyHidden);
+
+        harness.coordinator.reopen(STICKY_ID).await.unwrap();
+
+        assert!(!harness.repository.hidden.load(Ordering::SeqCst));
+        assert!(harness.catalog.identities.lock().unwrap().is_empty());
+        assert!(harness.native.calls.lock().unwrap().is_empty());
+        assert_eq!(*harness.windows.reopen_count.lock().unwrap(), 0);
+        assert_eq!(
+            harness.coordinator.runtime_state_for(STICKY_ID),
+            Some(RuntimeState::Suspended)
+        );
+    }
+
+    #[tokio::test]
+    async fn reopen_keeps_manual_hide_when_exact_target_is_unavailable() {
+        let catalog = Arc::new(FakeCatalog::with_results(vec![Ok(false)]));
+        let harness = Harness::with_catalog(true, catalog);
+        harness
+            .coordinator
+            .set_runtime_state(STICKY_ID, RuntimeState::ManuallyHidden);
+
+        assert!(harness.coordinator.reopen(STICKY_ID).await.is_err());
+
+        assert!(harness.repository.hidden.load(Ordering::SeqCst));
+        assert!(harness.native.calls.lock().unwrap().is_empty());
+        assert_eq!(*harness.windows.reopen_count.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn reopen_reveal_failure_keeps_hidden_and_suspends_runtime_window() {
+        let harness = Harness::active(true);
+        harness
+            .coordinator
+            .set_runtime_state(STICKY_ID, RuntimeState::ManuallyHidden);
+        harness.windows.fail_reopen.store(true, Ordering::SeqCst);
+
+        assert!(harness.coordinator.reopen(STICKY_ID).await.is_err());
+
+        assert!(harness.repository.hidden.load(Ordering::SeqCst));
+        assert_eq!(
+            *harness.native.calls.lock().unwrap(),
+            vec![
+                NativeCall::Attach(TARGET_WINDOW_ID),
+                NativeCall::Resume(TARGET_WINDOW_ID),
+                NativeCall::Suspend
+            ]
+        );
+        assert_eq!(
+            harness.coordinator.runtime_state_for(STICKY_ID),
+            Some(RuntimeState::ManuallyHidden)
+        );
+    }
+
+    #[tokio::test]
+    async fn reopen_attach_failure_keeps_hidden_and_transitions_terminally() {
+        let harness = Harness::active(true);
+        harness
+            .coordinator
+            .set_runtime_state(STICKY_ID, RuntimeState::ManuallyHidden);
+        *harness.native.attach_results.lock().unwrap() =
+            VecDeque::from([Err(AppError::Other("attach failed".into()))]);
+
+        assert!(harness.coordinator.reopen(STICKY_ID).await.is_err());
+
+        let binding = harness
+            .repository
+            .binding(STICKY_ID)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(binding.state, BindingState::Unavailable);
+        assert_eq!(binding.runtime_pid, None);
+        assert_eq!(binding.runtime_window_id, None);
+        assert!(harness.repository.hidden.load(Ordering::SeqCst));
+        assert_eq!(*harness.windows.reopen_count.lock().unwrap(), 0);
+        assert_eq!(
+            harness.coordinator.runtime_state_for(STICKY_ID),
+            Some(RuntimeState::Unavailable)
+        );
+    }
+
+    #[tokio::test]
+    async fn reopen_hidden_commit_failure_suspends_runtime_window() {
+        let harness = Harness::active(true);
+        harness
+            .coordinator
+            .set_runtime_state(STICKY_ID, RuntimeState::ManuallyHidden);
+        harness
+            .repository
+            .fail_set_hidden
+            .store(true, Ordering::SeqCst);
+
+        assert!(harness.coordinator.reopen(STICKY_ID).await.is_err());
+
+        assert!(harness.repository.hidden.load(Ordering::SeqCst));
+        assert_eq!(
+            harness.native.calls.lock().unwrap().last(),
+            Some(&NativeCall::Suspend)
+        );
+        assert_eq!(
+            harness.coordinator.runtime_state_for(STICKY_ID),
+            Some(RuntimeState::ManuallyHidden)
+        );
+    }
+
+    #[tokio::test]
+    async fn unbind_retries_pin_restoration_after_binding_was_removed() {
+        let harness = Harness::active(false);
+        harness.install_observer().await;
+        harness
+            .windows
+            .fail_restore_pinning
+            .store(true, Ordering::SeqCst);
+
+        assert!(harness.coordinator.unbind(STICKY_ID).await.is_err());
+        assert!(harness
+            .repository
+            .binding(STICKY_ID)
+            .await
+            .unwrap()
+            .is_none());
+
+        harness.coordinator.unbind(STICKY_ID).await.unwrap();
+        assert_eq!(*harness.windows.restore_pin_count.lock().unwrap(), 2);
+    }
+
+    #[tokio::test]
     async fn rebind_detach_failure_cannot_leave_an_unobserved_active_binding() {
         let harness = Harness::active(false);
         harness.install_observer().await;
@@ -1446,10 +1912,10 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(binding.state, BindingState::Unavailable);
-        assert_eq!(binding.runtime_pid, None);
-        assert_eq!(binding.runtime_window_id, None);
-        assert!(!harness
+        assert_eq!(binding.state, BindingState::Active);
+        assert_eq!(binding.runtime_pid, Some(i64::from(TARGET_PID)));
+        assert_eq!(binding.runtime_window_id, Some(i64::from(TARGET_WINDOW_ID)));
+        assert!(harness
             .coordinator
             .inner
             .active_observers
@@ -1472,10 +1938,10 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(binding.state, BindingState::Unavailable);
-        assert_eq!(binding.runtime_pid, None);
-        assert_eq!(binding.runtime_window_id, None);
-        assert!(!harness
+        assert_eq!(binding.state, BindingState::Active);
+        assert_eq!(binding.runtime_pid, Some(i64::from(TARGET_PID)));
+        assert_eq!(binding.runtime_window_id, Some(i64::from(TARGET_WINDOW_ID)));
+        assert!(harness
             .coordinator
             .inner
             .active_observers

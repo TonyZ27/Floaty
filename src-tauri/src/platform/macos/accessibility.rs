@@ -246,9 +246,6 @@ impl ObserverRegistration for MacOSObserverRegistration {
         if self.stopped {
             return Ok(());
         }
-        if let Some(task) = self.permission_task.take() {
-            task.abort();
-        }
         let observer_id = self.observer_id;
         run_on_main_thread(&self.app, move || {
             NATIVE_OBSERVERS.with(|observers| {
@@ -257,6 +254,9 @@ impl ObserverRegistration for MacOSObserverRegistration {
             Ok(())
         })
         .await?;
+        if let Some(task) = self.permission_task.take() {
+            task.abort();
+        }
         self.stopped = true;
         Ok(())
     }
