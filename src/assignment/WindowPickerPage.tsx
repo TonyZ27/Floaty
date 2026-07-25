@@ -332,7 +332,7 @@ export function WindowPickerPage({ stickyId }: { stickyId: string }) {
       <footer className="window-picker-footer">
         <span>方向键选择</span>
         <span>Enter 确认</span>
-        <span>Esc 取消</span>
+        <span>Esc 关闭</span>
       </footer>
     </main>
   );
