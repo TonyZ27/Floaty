@@ -1,10 +1,11 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Editor } from "../editor/Editor";
 import { useStickyData } from "./useStickyData";
 import { SettingsPopover } from "./SettingsPopover";
+import { BindingButton } from "./BindingButton";
 import { ipc } from "../ipc/client";
 import { autoFg } from "../theme/contrast";
-import type { StickyPatch } from "../ipc/types";
+import type { StickyPatch, WindowBindingView } from "../ipc/types";
 import { FileText, Pin, Settings, X, ChevronDown, ChevronUp } from "lucide-react";
 
 interface StickyPageProps {
@@ -17,6 +18,26 @@ export function StickyPage({ stickyId }: StickyPageProps) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   const [tempTitle, setTempTitle] = useState("");
+  const [bindingStatus, setBindingStatus] = useState<boolean | null>(null);
+
+  const refreshSticky = useCallback(async () => {
+    try {
+      const fresh = await ipc.getSticky(stickyId);
+      setSticky(fresh);
+    } catch (err) {
+      console.error("[floaty] sticky refresh failed:", err);
+    }
+  }, [setSticky, stickyId]);
+
+  const handleBindingChange = useCallback(
+    (binding: WindowBindingView | null | undefined) => {
+      setBindingStatus(binding === undefined ? null : binding !== null);
+      if (binding === null) {
+        void refreshSticky();
+      }
+    },
+    [refreshSticky],
+  );
 
   // 便签内快捷键：⌘W / ⌘⇧P / ⌘, / ⌘⌫
   // 必须在任何 early-return 之前挂，否则 Rules of Hooks 炸。
@@ -38,11 +59,11 @@ export function StickyPage({ stickyId }: StickyPageProps) {
       }
       if (key === "p" && e.shiftKey) {
         e.preventDefault();
+        if (bindingStatus !== false) return;
         (async () => {
           try {
             await ipc.togglePin(stickyId);
-            const fresh = await ipc.getSticky(stickyId);
-            setSticky(fresh);
+            await refreshSticky();
           } catch (err) {
             console.error("[floaty] ⌘⇧P:", err);
           }
@@ -77,7 +98,7 @@ export function StickyPage({ stickyId }: StickyPageProps) {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [stickyId, setSticky]);
+  }, [bindingStatus, refreshSticky, stickyId, setSticky]);
 
   if (!loaded || !sticky) {
     return <div className="h-screen bg-yellow-100 p-3 text-xs opacity-60">Loading...</div>;
@@ -89,10 +110,10 @@ export function StickyPage({ stickyId }: StickyPageProps) {
   const onTogglePin = async (e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
+    if (bindingStatus !== false) return;
     try {
       await ipc.togglePin(stickyId);
-      const fresh = await ipc.getSticky(stickyId);
-      setSticky(fresh);
+      await refreshSticky();
     } catch (err) {
       console.error("[floaty] togglePin failed:", err);
     }
@@ -227,11 +248,6 @@ export function StickyPage({ stickyId }: StickyPageProps) {
               {sticky.title || "Floaty"}
             </span>
           )}
-          {pinned && (
-            <span className="pointer-events-none text-[9px] font-semibold uppercase tracking-wider px-1.5 py-[2px] rounded bg-red-500 text-white max-[240px]:hidden flex-shrink-0 shadow-sm shadow-red-500/20">
-              已置顶
-            </span>
-          )}
         </div>
         <div
           className="flex items-center gap-1"
@@ -252,6 +268,11 @@ export function StickyPage({ stickyId }: StickyPageProps) {
               <ChevronUp size={13} strokeWidth={2.2} />
             )}
           </button>
+          <BindingButton
+            stickyId={stickyId}
+            onBindingChange={handleBindingChange}
+            onBindingMutation={refreshSticky}
+          />
           <button
             type="button"
             className={`w-6 h-6 flex items-center justify-center rounded-md transition-all duration-150 active:scale-[0.92] ${
@@ -260,7 +281,25 @@ export function StickyPage({ stickyId }: StickyPageProps) {
                 : "opacity-45 hover:opacity-90 hover:bg-black/5"
             }`}
             onClick={onTogglePin}
-            title={pinned ? "已置顶（点击取消）" : "置顶"}
+            disabled={bindingStatus !== false}
+            aria-label={
+              bindingStatus === true
+                ? "已绑定到窗口时，置顶由绑定关系管理"
+                : bindingStatus === null
+                  ? "无法确认窗口绑定，置顶暂不可用"
+                  : pinned
+                    ? "已置顶（点击取消）"
+                    : "置顶"
+            }
+            title={
+              bindingStatus === true
+                ? "已绑定到窗口时，置顶由绑定关系管理"
+                : bindingStatus === null
+                  ? "无法确认窗口绑定，置顶暂不可用"
+                  : pinned
+                    ? "已置顶（点击取消）"
+                    : "置顶"
+            }
             style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
           >
             <Pin size={13} strokeWidth={2.2} className={pinned ? "rotate-45" : ""} />
