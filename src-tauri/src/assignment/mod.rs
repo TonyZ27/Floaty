@@ -1,3 +1,4 @@
+pub mod coordinator;
 pub mod state;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -64,6 +65,7 @@ pub enum BindingEvent {
     TargetMinimized,
     TargetRestored,
     TargetClosed,
+    TargetSpaceChanged,
     SimilarWindowOpened,
     PermissionRevoked,
 }

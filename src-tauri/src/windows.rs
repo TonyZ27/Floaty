@@ -150,6 +150,35 @@ pub async fn toggle_pin(app: &AppHandle, sticky_id: &str, db: &Db) -> AppResult<
     Ok(next == 1)
 }
 
+#[cfg(target_os = "macos")]
+pub fn suspend_for_binding(
+    app: &AppHandle,
+    sticky_id: &str,
+    spaces: &dyn crate::platform::macos::window_spaces::WindowSpaceBackend,
+) -> AppResult<()> {
+    let window = app
+        .get_webview_window(&label(sticky_id))
+        .ok_or(AppError::NotFound)?;
+    let note_window_id =
+        crate::platform::macos::window_spaces::note_window_id(&window)?;
+    spaces.order_out(note_window_id)
+}
+
+#[cfg(target_os = "macos")]
+pub fn resume_for_binding(
+    app: &AppHandle,
+    sticky_id: &str,
+    target_window_id: u32,
+    spaces: &dyn crate::platform::macos::window_spaces::WindowSpaceBackend,
+) -> AppResult<()> {
+    let window = app
+        .get_webview_window(&label(sticky_id))
+        .ok_or(AppError::NotFound)?;
+    let note_window_id =
+        crate::platform::macos::window_spaces::note_window_id(&window)?;
+    spaces.order_front(target_window_id, note_window_id)
+}
+
 /// 一键排版：把所有可见便签按网格重新摆放（320x420 + 40px 间距，4 列 wrap）。
 /// 隐藏的便签不动，等显示时再排。
 pub async fn tile_all(app: &AppHandle, db: &Db) -> AppResult<usize> {
@@ -234,7 +263,7 @@ pub async fn show_all(app: &AppHandle, db: &Db) -> AppResult<usize> {
 /// 仅当**全库为空**（首次安装）时才自动创建一张默认便签；
 /// 有便签但都 hidden=1 时，只启动 tray，让用户通过菜单栏恢复，避免每次重启都冒出空白新便签。
 pub async fn restore_on_startup(app: &AppHandle, db: &Db) -> AppResult<()> {
-    let visible = db::stickies::list_visible(db).await?;
+    let visible = db::stickies::list_visible_unbound(db).await?;
     eprintln!("[floaty] restore_on_startup: found {} visible stickies", visible.len());
     if !visible.is_empty() {
         for s in visible {

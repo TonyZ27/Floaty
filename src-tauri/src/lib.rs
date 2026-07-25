@@ -74,6 +74,54 @@ pub fn run() {
                 async move { db::init(data_dir).await.expect("db init") }
             });
             app.manage(pool.clone());
+            tauri::async_runtime::block_on(
+                db::window_bindings::mark_all_reconnect_required(&pool),
+            )
+            .expect("mark bindings reconnect-required");
+
+            #[cfg(target_os = "macos")]
+            {
+                use std::sync::Arc;
+
+                let repository = Arc::new(
+                    assignment::coordinator::DbBindingRepository::new(pool.clone()),
+                );
+                let catalog = Arc::new(
+                    assignment::coordinator::MainThreadWindowCatalog::new(
+                        handle.clone(),
+                        Arc::new(
+                            platform::macos::window_catalog::MacOSWindowCatalog::default(),
+                        ),
+                    ),
+                );
+                let spaces = Arc::new(
+                    platform::macos::window_spaces::MacOSWindowSpaceBackend::default(),
+                );
+                let native = Arc::new(
+                    assignment::coordinator::TauriNativeWindowRuntime::new(
+                        handle.clone(),
+                        spaces,
+                    ),
+                );
+                let note_windows = Arc::new(
+                    assignment::coordinator::TauriNoteWindowRuntime::new(
+                        handle.clone(),
+                        pool.clone(),
+                    ),
+                );
+                let observers = Arc::new(
+                    platform::macos::accessibility::MacOSAccessibilityObserverFactory::new(
+                        handle.clone(),
+                    ),
+                );
+                app.manage(assignment::coordinator::BindingCoordinator::new(
+                    repository,
+                    catalog,
+                    native,
+                    note_windows,
+                    observers,
+                ));
+            }
 
             // 自动快照：不阻塞启动，失败也不影响。保留最近 10 份。
             {

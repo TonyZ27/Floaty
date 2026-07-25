@@ -118,6 +118,28 @@ pub async fn set_state(db: &Db, sticky_id: &str, state: BindingState) -> AppResu
     get(db, sticky_id).await?.ok_or(AppError::NotFound)
 }
 
+pub async fn set_state_and_clear_runtime(
+    db: &Db,
+    sticky_id: &str,
+    state: BindingState,
+) -> AppResult<WindowBinding> {
+    let now = chrono::Utc::now().timestamp_millis();
+    let updated = sqlx::query(
+        "UPDATE window_bindings
+         SET state = ?, runtime_pid = NULL, runtime_window_id = NULL, updated_at = ?
+         WHERE sticky_id = ?",
+    )
+    .bind(state)
+    .bind(now)
+    .bind(sticky_id)
+    .execute(db)
+    .await?;
+    if updated.rows_affected() == 0 {
+        return Err(AppError::NotFound);
+    }
+    get(db, sticky_id).await?.ok_or(AppError::NotFound)
+}
+
 pub async fn mark_all_reconnect_required(db: &Db) -> AppResult<u64> {
     let now = chrono::Utc::now().timestamp_millis();
     let updated = sqlx::query(
@@ -329,6 +351,24 @@ mod tests {
         assert_eq!(saved.state, BindingState::ReconnectRequired);
         assert_eq!(saved.runtime_pid, None);
         assert_eq!(saved.runtime_window_id, None);
+    }
+
+    #[tokio::test]
+    async fn target_close_keeps_binding_and_clears_runtime_identity_atomically() {
+        let db = test_pool().await;
+        let sticky = crate::db::stickies::create_default(&db).await.unwrap();
+        bind(&db, NewWindowBinding::test(&sticky.id, 101))
+            .await
+            .unwrap();
+
+        let saved = set_state_and_clear_runtime(&db, &sticky.id, BindingState::TargetClosed)
+            .await
+            .unwrap();
+
+        assert_eq!(saved.state, BindingState::TargetClosed);
+        assert_eq!(saved.runtime_pid, None);
+        assert_eq!(saved.runtime_window_id, None);
+        assert!(get(&db, &sticky.id).await.unwrap().is_some());
     }
 
     #[tokio::test]

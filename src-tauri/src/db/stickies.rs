@@ -69,6 +69,21 @@ pub async fn list_visible(db: &Db) -> AppResult<Vec<Sticky>> {
     Ok(rows)
 }
 
+pub async fn list_visible_unbound(db: &Db) -> AppResult<Vec<Sticky>> {
+    let rows = sqlx::query_as::<_, Sticky>(
+        "SELECT s.* FROM stickies s
+         WHERE s.hidden = 0
+           AND s.deleted_at IS NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM window_bindings b WHERE b.sticky_id = s.id
+           )
+         ORDER BY s.z_order ASC",
+    )
+    .fetch_all(db)
+    .await?;
+    Ok(rows)
+}
+
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct StickyPatch {
     pub title: Option<String>,
@@ -240,6 +255,34 @@ mod tests {
         let visible = list_visible(&pool).await.unwrap();
         assert_eq!(visible.len(), 1);
         assert_ne!(visible[0].id, a.id);
+    }
+
+    #[tokio::test]
+    async fn list_visible_unbound_excludes_bound_notes_without_hiding_them() {
+        let pool = test_pool().await;
+        let bound = create_default(&pool).await.unwrap();
+        let unbound = create_default(&pool).await.unwrap();
+        crate::db::window_bindings::bind(
+            &pool,
+            crate::db::window_bindings::NewWindowBinding {
+                sticky_id: bound.id.clone(),
+                app_bundle_id: "com.example.Target".into(),
+                app_name: "Target".into(),
+                window_title: "Document".into(),
+                runtime_pid: 42,
+                runtime_window_id: 101,
+            },
+        )
+        .await
+        .unwrap();
+
+        let visible = list_visible_unbound(&pool).await.unwrap();
+
+        assert_eq!(
+            visible.iter().map(|sticky| sticky.id.as_str()).collect::<Vec<_>>(),
+            vec![unbound.id.as_str()]
+        );
+        assert_eq!(get(&pool, &bound.id).await.unwrap().hidden, 0);
     }
 
     #[tokio::test]
