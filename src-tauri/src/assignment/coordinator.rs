@@ -325,10 +325,19 @@ impl BindingCoordinator {
         }
         let current = self.runtime_state(sticky_id, &binding).await?;
         if current == RuntimeState::SuspendedManuallyHidden {
-            self.inner
+            if let Err(error) = self.inner.windows.reopen(sticky_id).await {
+                let _ = self.inner.native.suspend(sticky_id).await;
+                return Err(error);
+            }
+            if let Err(error) = self
+                .inner
                 .repository
                 .set_manually_hidden(sticky_id, false)
-                .await?;
+                .await
+            {
+                let _ = self.inner.native.suspend(sticky_id).await;
+                return Err(error);
+            }
             self.set_runtime_state(sticky_id, RuntimeState::Suspended);
             return Ok(binding);
         }
@@ -1763,7 +1772,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reopening_while_target_is_suspended_only_clears_manual_hide() {
+    async fn reopening_while_target_is_suspended_restores_position_before_clearing_hide() {
         let harness = Harness::active(true);
         harness
             .coordinator
@@ -1774,10 +1783,71 @@ mod tests {
         assert!(!harness.repository.hidden.load(Ordering::SeqCst));
         assert!(harness.catalog.identities.lock().unwrap().is_empty());
         assert!(harness.native.calls.lock().unwrap().is_empty());
-        assert_eq!(*harness.windows.reopen_count.lock().unwrap(), 0);
+        assert_eq!(*harness.windows.reopen_count.lock().unwrap(), 1);
         assert_eq!(
             harness.coordinator.runtime_state_for(STICKY_ID),
             Some(RuntimeState::Suspended)
+        );
+
+        harness
+            .coordinator
+            .handle(STICKY_ID, BindingEvent::TargetRestored)
+            .await
+            .unwrap();
+        assert_eq!(
+            *harness.native.calls.lock().unwrap(),
+            vec![NativeCall::Resume(TARGET_WINDOW_ID)]
+        );
+        assert_eq!(*harness.windows.reopen_count.lock().unwrap(), 1);
+        assert_eq!(
+            harness.coordinator.runtime_state_for(STICKY_ID),
+            Some(RuntimeState::Visible)
+        );
+    }
+
+    #[tokio::test]
+    async fn suspended_reopen_position_failure_keeps_manual_hide_and_order_out() {
+        let harness = Harness::active(true);
+        harness
+            .coordinator
+            .set_runtime_state(STICKY_ID, RuntimeState::SuspendedManuallyHidden);
+        harness.windows.fail_reopen.store(true, Ordering::SeqCst);
+
+        assert!(harness.coordinator.reopen(STICKY_ID).await.is_err());
+
+        assert!(harness.repository.hidden.load(Ordering::SeqCst));
+        assert_eq!(
+            *harness.native.calls.lock().unwrap(),
+            vec![NativeCall::Suspend]
+        );
+        assert_eq!(
+            harness.coordinator.runtime_state_for(STICKY_ID),
+            Some(RuntimeState::SuspendedManuallyHidden)
+        );
+    }
+
+    #[tokio::test]
+    async fn suspended_reopen_hidden_commit_failure_keeps_note_ordered_out() {
+        let harness = Harness::active(true);
+        harness
+            .coordinator
+            .set_runtime_state(STICKY_ID, RuntimeState::SuspendedManuallyHidden);
+        harness
+            .repository
+            .fail_set_hidden
+            .store(true, Ordering::SeqCst);
+
+        assert!(harness.coordinator.reopen(STICKY_ID).await.is_err());
+
+        assert_eq!(*harness.windows.reopen_count.lock().unwrap(), 1);
+        assert!(harness.repository.hidden.load(Ordering::SeqCst));
+        assert_eq!(
+            *harness.native.calls.lock().unwrap(),
+            vec![NativeCall::Suspend]
+        );
+        assert_eq!(
+            harness.coordinator.runtime_state_for(STICKY_ID),
+            Some(RuntimeState::SuspendedManuallyHidden)
         );
     }
 
