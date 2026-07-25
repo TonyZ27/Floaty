@@ -162,8 +162,16 @@ pub async fn open_window_picker(
     db: State<'_, Db>,
     sticky_id: String,
 ) -> AppResult<()> {
-    let (label, route) = picker_window_parts(&sticky_id)?;
-    if crate::db::stickies::get(&db, &sticky_id)
+    open_window_picker_for_sticky(&app, &db, &sticky_id).await
+}
+
+pub(crate) async fn open_window_picker_for_sticky(
+    app: &AppHandle,
+    db: &Db,
+    sticky_id: &str,
+) -> AppResult<()> {
+    let (label, route) = picker_window_parts(sticky_id)?;
+    if crate::db::stickies::get(db, sticky_id)
         .await?
         .deleted_at
         .is_some()
@@ -177,7 +185,7 @@ pub async fn open_window_picker(
         let _ = window.set_focus();
         return Ok(());
     }
-    WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(route.into()))
+    WebviewWindowBuilder::new(app, &label, WebviewUrl::App(route.into()))
         .title("绑定到窗口")
         .inner_size(PICKER_WIDTH, PICKER_HEIGHT)
         .min_inner_size(PICKER_WIDTH, PICKER_HEIGHT)
