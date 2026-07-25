@@ -108,14 +108,6 @@ impl Default for MacOSWindowCatalog {
     }
 }
 
-impl MacOSWindowCatalog {
-    pub fn new(floaty_bundle_id: impl Into<String>) -> Self {
-        Self {
-            floaty_bundle_id: floaty_bundle_id.into(),
-        }
-    }
-}
-
 impl WindowCatalog for MacOSWindowCatalog {
     fn list_eligible(&self) -> AppResult<Vec<WindowDescriptor>> {
         if accessibility::status() != AccessibilityStatus::Granted {

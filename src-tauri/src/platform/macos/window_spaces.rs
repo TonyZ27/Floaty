@@ -333,7 +333,7 @@ impl SkyLight {
         }
         let _: () = unsafe { msg_send![spaces, release] };
 
-        if space_ids.is_empty() || space_ids.iter().any(|space_id| *space_id == 0) {
+        if space_ids.is_empty() || space_ids.contains(&0) {
             return Err(unavailable());
         }
         Ok(space_ids)

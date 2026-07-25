@@ -37,7 +37,7 @@ pub struct WindowBindingView {
 pub fn get_accessibility_status() -> AccessibilityStatusView {
     #[cfg(target_os = "macos")]
     {
-        return accessibility_status_view(crate::platform::macos::accessibility::status());
+        accessibility_status_view(crate::platform::macos::accessibility::status())
     }
     #[cfg(not(target_os = "macos"))]
     AccessibilityStatusView::Denied

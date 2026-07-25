@@ -598,6 +598,9 @@ fn build_menu(
     Ok(menu)
 }
 
+// The production event handlers intentionally follow this focused view-model test
+// module; moving the large existing test block would create a noisy, unrelated diff.
+#[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

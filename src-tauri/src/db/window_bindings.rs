@@ -179,14 +179,6 @@ pub async fn unbind(db: &Db, sticky_id: &str) -> AppResult<Option<WindowBinding>
     Ok(Some(binding))
 }
 
-pub async fn remove_for_deleted_sticky(db: &Db, sticky_id: &str) -> AppResult<()> {
-    sqlx::query("DELETE FROM window_bindings WHERE sticky_id = ?")
-        .bind(sticky_id)
-        .execute(db)
-        .await?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

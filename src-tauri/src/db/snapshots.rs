@@ -36,7 +36,7 @@ fn prune(dir: &Path, keep: usize) -> std::io::Result<()> {
         })
         .collect();
     // 文件名里的 YYYYMMDD-HHMMSS 字典序和时间顺序一致，降序 = 最新在前
-    entries.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.file_name()));
     for e in entries.into_iter().skip(keep) {
         let _ = fs::remove_file(e.path());
     }

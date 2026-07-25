@@ -61,11 +61,16 @@ pub enum RuntimeState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BindingEvent {
     UserHidNote,
+    // Kept in the domain matrix to prove user intent cannot reopen terminal states;
+    // production reopening performs exact-target validation before this transition.
+    #[allow(dead_code)]
     UserOpenedNote,
     TargetMinimized,
     TargetRestored,
     TargetClosed,
     TargetSpaceChanged,
+    // Kept as an explicit no-op so tests guard the no-auto-match product rule.
+    #[allow(dead_code)]
     SimilarWindowOpened,
     PermissionRevoked,
 }

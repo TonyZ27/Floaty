@@ -10,11 +10,6 @@ pub fn label(sticky_id: &str) -> String {
     format!("sticky-{}", sticky_id)
 }
 
-/// 从 label 反解 sticky id
-pub fn id_from_label(label: &str) -> Option<&str> {
-    label.strip_prefix("sticky-")
-}
-
 /// 打开一个便签窗口（已存在则 show + focus）。成功返回 WebviewWindow。
 pub async fn open(app: &AppHandle, sticky: &Sticky) -> AppResult<WebviewWindow> {
     open_with_mode(app, sticky, false).await
@@ -53,7 +48,11 @@ async fn open_with_mode(
     // 防御式 clamp：如果过去因 bug 存了异常大的"逻辑尺寸"，重置为默认
     let (w, h) = sanitize_size(sticky.w, sticky.h);
     let is_collapsed = sticky.collapsed == 1;
-    let final_w = if is_collapsed { (sticky.collapsed_w).max(200).min(1600) as f64 } else { w as f64 };
+    let final_w = if is_collapsed {
+        sticky.collapsed_w.clamp(200, 1600) as f64
+    } else {
+        w as f64
+    };
     let final_h = if is_collapsed { 36.0 } else { h as f64 };
 
     let mut builder = WebviewWindowBuilder::new(app, &lbl, WebviewUrl::App(url.into()))
@@ -301,6 +300,7 @@ pub async fn tile_all(app: &AppHandle, db: &Db) -> AppResult<usize> {
 /// - hidden=1：先 un-hide（DB + webview）+ open 窗口
 /// - hidden=0 有 window：show + set_focus 提到前面
 /// - hidden=0 无 window（异常）：open 重建
+///
 /// 返回被操作的便签数。
 pub async fn show_all(app: &AppHandle, db: &Db) -> AppResult<usize> {
     let all = db::stickies::list_all_unbound(db).await?;

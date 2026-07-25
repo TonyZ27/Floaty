@@ -324,9 +324,7 @@ impl BindingCoordinator {
         }
         self.stop_observer(sticky_id).await?;
         if should_detach {
-            if let Err(error) = self.detach(sticky_id).await {
-                return Err(error);
-            }
+            self.detach(sticky_id).await?;
         }
         self.inner
             .runtime_states

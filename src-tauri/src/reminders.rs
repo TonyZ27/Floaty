@@ -90,11 +90,7 @@ impl Scheduler {
 }
 
 fn fire(app: &AppHandle, reminder: &Reminder) {
-    let title = if reminder.text_preview.is_empty() {
-        "Floaty 提醒".to_string()
-    } else {
-        "Floaty 提醒".to_string()
-    };
+    let title = "Floaty 提醒".to_string();
     let body = if reminder.text_preview.is_empty() {
         "到期任务".to_string()
     } else {
