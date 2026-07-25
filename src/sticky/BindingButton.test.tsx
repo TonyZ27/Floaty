@@ -283,6 +283,32 @@ describe("BindingButton", () => {
     ).toHaveTextContent("取消绑定失败，请重试。");
   });
 
+  it("finishes a successful unbind and refreshes parent sticky state", async () => {
+    const onBindingMutation = vi.fn();
+    mocks.ipc.getWindowBinding
+      .mockResolvedValueOnce(activeBinding)
+      .mockResolvedValueOnce(null);
+    render(
+      <BindingButton
+        stickyId={STICKY_ID}
+        onBindingMutation={onBindingMutation}
+      />,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "已绑定到 Chrome：Project Alpha",
+      }),
+    );
+
+    fireEvent.click(screen.getByRole("menuitem", { name: "取消绑定" }));
+
+    expect(
+      await screen.findByRole("button", { name: "绑定到窗口" }),
+    ).toBeVisible();
+    expect(mocks.ipc.unbindNoteFromWindow).toHaveBeenCalledWith(STICKY_ID);
+    expect(onBindingMutation).toHaveBeenCalledTimes(1);
+  });
+
   it("filters binding events and prevents an old fetch from overwriting a new result", async () => {
     const initial = deferred<WindowBindingView | null>();
     mocks.ipc.getWindowBinding
@@ -425,6 +451,13 @@ describe("StickyPage binding and pin status", () => {
     expect(pin).toHaveClass("bg-red-500/20");
     expect(screen.queryByText("已置顶")).toBeNull();
     expect(screen.queryByText("已绑定")).toBeNull();
+
+    fireEvent.keyDown(window, {
+      key: "p",
+      metaKey: true,
+      shiftKey: true,
+    });
+    expect(mocks.ipc.togglePin).not.toHaveBeenCalled();
   });
 
   it("refreshes restored pin state when unbind rejects after binding removal", async () => {
