@@ -1125,6 +1125,7 @@ name = "floaty"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "chrono",
  "libloading 0.8.9",
  "objc2 0.5.2",
