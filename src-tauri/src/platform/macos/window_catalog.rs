@@ -443,13 +443,21 @@ unsafe fn icon_png_data_url(icon: *mut AnyObject) -> Option<String> {
         None
     } else {
         let length: usize = unsafe { msg_send![png_data, length] };
-        let bytes: *const u8 = unsafe { msg_send![png_data, bytes] };
-        if bytes.is_null() || length == 0 {
+        if length == 0 {
             None
         } else {
-            // SAFETY: NSData owns `length` readable bytes for this autorelease
-            // pool; base64 encoding completes before the pool is drained.
-            let bytes = unsafe { std::slice::from_raw_parts(bytes, length) };
+            let mut bytes = vec![0_u8; length];
+            // `NSBitmapImageRep` may return an `OS_dispatch_data` subclass.
+            // Its `bytes` return encoding differs from NSData's on some macOS
+            // versions, while `getBytes:length:` keeps the stable void-pointer
+            // ABI and copies the payload into Rust-owned memory.
+            unsafe {
+                let _: () = msg_send![
+                    png_data,
+                    getBytes: bytes.as_mut_ptr().cast::<c_void>(),
+                    length: length
+                ];
+            }
             Some(format!("data:image/png;base64,{}", STANDARD.encode(bytes)))
         }
     };
@@ -533,6 +541,25 @@ unsafe fn dictionary_f64(dictionary: *mut AnyObject, key: *mut AnyObject) -> Opt
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn app_icon_png_encoding_copies_dispatch_data_without_bytes_selector() {
+        autoreleasepool(|_| unsafe {
+            let path = ns_string(
+                b"/System/Library/CoreServices/CoreTypes.bundle/Contents/Resources/GenericApplicationIcon.icns\0",
+            );
+            let allocated: *mut AnyObject = msg_send![class!(NSImage), alloc];
+            let icon: *mut AnyObject = msg_send![allocated, initWithContentsOfFile: path];
+            assert!(!icon.is_null());
+
+            let encoded = icon_png_data_url(icon);
+
+            let _: () = msg_send![icon, release];
+            assert!(encoded
+                .as_deref()
+                .is_some_and(|value| value.starts_with("data:image/png;base64,")));
+        });
+    }
 
     fn candidate(
         app_bundle_id: &str,
