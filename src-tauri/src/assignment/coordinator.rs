@@ -38,7 +38,12 @@ pub trait NativeWindowRuntime: Send + Sync {
     async fn detach(&self, sticky_id: &str) -> AppResult<()>;
     async fn suspend(&self, sticky_id: &str) -> AppResult<()>;
     async fn resume(&self, sticky_id: &str, target_window_id: u32) -> AppResult<()>;
-    async fn promote(&self, sticky_id: &str, target_window_id: u32) -> AppResult<()>;
+    async fn sync_ordering(
+        &self,
+        sticky_id: &str,
+        target_pid: i32,
+        target_window_id: u32,
+    ) -> AppResult<()>;
     async fn restore_ordering(&self, sticky_id: &str) -> AppResult<()>;
 }
 
@@ -467,16 +472,19 @@ impl BindingCoordinator {
                 self.reattach_exact_target(sticky_id, &binding).await?;
                 return Ok(());
             }
-            BindingEvent::TargetFocused => {
+            BindingEvent::TargetFocused | BindingEvent::TargetUnfocused => {
                 if current == RuntimeState::Visible {
                     self.inner
                         .native
-                        .promote(sticky_id, active_window_id(&binding)?)
+                        .sync_ordering(
+                            sticky_id,
+                            active_pid(&binding)?,
+                            active_window_id(&binding)?,
+                        )
                         .await?;
+                } else {
+                    self.inner.native.restore_ordering(sticky_id).await?;
                 }
-            }
-            BindingEvent::TargetUnfocused => {
-                self.inner.native.restore_ordering(sticky_id).await?;
             }
             BindingEvent::PermissionRevoked => {
                 let updated = self
@@ -955,7 +963,12 @@ impl NativeWindowRuntime for TauriNativeWindowRuntime {
         .await
     }
 
-    async fn promote(&self, sticky_id: &str, target_window_id: u32) -> AppResult<()> {
+    async fn sync_ordering(
+        &self,
+        sticky_id: &str,
+        target_pid: i32,
+        target_window_id: u32,
+    ) -> AppResult<()> {
         let sticky_id = sticky_id.to_owned();
         run_on_main_thread(&self.app, {
             let app = self.app.clone();
@@ -967,7 +980,14 @@ impl NativeWindowRuntime for TauriNativeWindowRuntime {
                     .ok_or(AppError::NotFound)?;
                 let note_window_id =
                     crate::platform::macos::window_spaces::note_window_id(&window)?;
-                spaces.promote(target_window_id, note_window_id)
+                if crate::platform::macos::accessibility::exact_target_is_focused(
+                    target_pid,
+                    target_window_id,
+                ) {
+                    spaces.promote(target_window_id, note_window_id)
+                } else {
+                    spaces.restore_ordering(note_window_id)
+                }
             }
         })
         .await
@@ -1213,7 +1233,7 @@ mod tests {
         Detach,
         Suspend,
         Resume(u32),
-        Promote(u32),
+        SyncOrdering(i32, u32),
         RestoreOrdering,
     }
 
@@ -1276,11 +1296,16 @@ mod tests {
             Ok(())
         }
 
-        async fn promote(&self, _sticky_id: &str, target_window_id: u32) -> AppResult<()> {
+        async fn sync_ordering(
+            &self,
+            _sticky_id: &str,
+            target_pid: i32,
+            target_window_id: u32,
+        ) -> AppResult<()> {
             self.calls
                 .lock()
                 .unwrap()
-                .push(NativeCall::Promote(target_window_id));
+                .push(NativeCall::SyncOrdering(target_pid, target_window_id));
             Ok(())
         }
 
@@ -1543,7 +1568,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exact_target_focus_promotes_only_a_visible_note() {
+    async fn focus_notifications_resync_visible_notes_and_restore_nonvisible_notes() {
         let visible = Harness::active(false);
         let original_geometry = *visible.windows.geometry.lock().unwrap();
 
@@ -1555,7 +1580,7 @@ mod tests {
 
         assert_eq!(
             *visible.native.calls.lock().unwrap(),
-            vec![NativeCall::Promote(TARGET_WINDOW_ID)]
+            vec![NativeCall::SyncOrdering(TARGET_PID, TARGET_WINDOW_ID)]
         );
         assert_eq!(*visible.windows.geometry.lock().unwrap(), original_geometry);
 
@@ -1573,7 +1598,10 @@ mod tests {
                 .handle(STICKY_ID, BindingEvent::TargetFocused)
                 .await
                 .unwrap();
-            assert!(hidden_or_suspended.native.calls.lock().unwrap().is_empty());
+            assert_eq!(
+                *hidden_or_suspended.native.calls.lock().unwrap(),
+                vec![NativeCall::RestoreOrdering]
+            );
             assert_eq!(
                 hidden_or_suspended.coordinator.runtime_state_for(STICKY_ID),
                 Some(state)
@@ -1582,19 +1610,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn losing_exact_target_focus_restores_original_ordering_without_moving_note() {
+    async fn stale_focus_and_unfocus_notifications_both_resync_from_current_native_focus() {
         let harness = Harness::active(false);
         let original_geometry = *harness.windows.geometry.lock().unwrap();
 
-        harness
-            .coordinator
-            .handle(STICKY_ID, BindingEvent::TargetUnfocused)
-            .await
-            .unwrap();
+        for event in [BindingEvent::TargetFocused, BindingEvent::TargetUnfocused] {
+            harness.coordinator.handle(STICKY_ID, event).await.unwrap();
+        }
 
         assert_eq!(
             *harness.native.calls.lock().unwrap(),
-            vec![NativeCall::RestoreOrdering]
+            vec![
+                NativeCall::SyncOrdering(TARGET_PID, TARGET_WINDOW_ID),
+                NativeCall::SyncOrdering(TARGET_PID, TARGET_WINDOW_ID),
+            ]
         );
         assert_eq!(*harness.windows.geometry.lock().unwrap(), original_geometry);
     }

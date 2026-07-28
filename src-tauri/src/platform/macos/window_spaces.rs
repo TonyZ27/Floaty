@@ -22,6 +22,9 @@ type CopySpacesForWindows = unsafe extern "C" fn(u32, i32, *const c_void) -> *mu
 type MoveWindowsToManagedSpace = unsafe extern "C" fn(u32, *const c_void, u64);
 type OrderWindow = unsafe extern "C" fn(u32, u32, i32, u32) -> i32;
 type GetWindowSubLevel = unsafe extern "C" fn(u32, u32) -> i32;
+// The void ABI was confirmed against the local macOS SkyLight disassembly.
+// SLSSetWindowSubLevel has no reliable status return, so every write is verified
+// with SLSGetWindowSubLevel instead.
 type SetWindowSubLevel = unsafe extern "C" fn(u32, u32, i32);
 
 /// A receipt that verifies the Note's immediate managed-Space placement.

@@ -611,6 +611,14 @@ fn target_focus_event(pid: i32, target_window_id: u32) -> BindingEvent {
     )
 }
 
+/// Re-evaluates the live frontmost application and exact AX focused window.
+///
+/// Call this on the macOS main thread immediately before mutating window order;
+/// notification payloads may already be stale by the time async handling runs.
+pub(crate) fn exact_target_is_focused(pid: i32, target_window_id: u32) -> bool {
+    target_focus_event(pid, target_window_id) == BindingEvent::TargetFocused
+}
+
 fn focus_event(
     frontmost_pid: Option<i32>,
     target_pid: i32,
