@@ -21,6 +21,8 @@ type MainConnectionId = unsafe extern "C" fn() -> u32;
 type CopySpacesForWindows = unsafe extern "C" fn(u32, i32, *const c_void) -> *mut c_void;
 type MoveWindowsToManagedSpace = unsafe extern "C" fn(u32, *const c_void, u64);
 type OrderWindow = unsafe extern "C" fn(u32, u32, i32, u32) -> i32;
+type GetWindowSubLevel = unsafe extern "C" fn(u32, u32) -> i32;
+type SetWindowSubLevel = unsafe extern "C" fn(u32, u32, i32);
 
 /// A receipt that verifies the Note's immediate managed-Space placement.
 ///
@@ -51,12 +53,15 @@ pub trait WindowSpaceBackend: Send + Sync {
     fn detach(&self, note_window_id: u32) -> AppResult<()>;
     fn order_out(&self, note_window_id: u32) -> AppResult<()>;
     fn order_front(&self, target_window_id: u32, note_window_id: u32) -> AppResult<()>;
+    fn promote(&self, target_window_id: u32, note_window_id: u32) -> AppResult<()>;
+    fn restore_ordering(&self, note_window_id: u32) -> AppResult<()>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct OriginalWindowState {
     space_id: u64,
     collection_behavior: usize,
+    sublevel: i32,
 }
 
 /// Keep one backend instance alive for the lifetime of active attachments so
@@ -82,6 +87,7 @@ impl WindowSpaceBackend for MacOSWindowSpaceBackend {
                 sky_light.single_space_for_window(connection, target_window_id)?;
             let note_space_before_attach =
                 sky_light.single_space_for_window(connection, note_window_id)?;
+            let original_sublevel = sky_light.window_sublevel(connection, note_window_id);
 
             let saved_origin = self.original_state(note_window_id);
             let had_existing_token = saved_origin.is_some();
@@ -89,6 +95,7 @@ impl WindowSpaceBackend for MacOSWindowSpaceBackend {
             let rollback_state = OriginalWindowState {
                 space_id: note_space_before_attach,
                 collection_behavior: original_collection_behavior,
+                sublevel: original_sublevel,
             };
             let binding_origin = saved_origin.unwrap_or(rollback_state);
             // Save recovery state before the first private Space mutation.
@@ -127,7 +134,7 @@ impl WindowSpaceBackend for MacOSWindowSpaceBackend {
                 Ok(attachment) => Ok(attachment),
                 Err(forward_error) => {
                     let rollback_succeeded = sky_light
-                        .restore_window_state(connection, note_window_id, rollback_state)
+                        .restore_complete_window_state(connection, note_window_id, rollback_state)
                         .is_ok();
                     if !should_keep_recovery_token(had_existing_token, rollback_succeeded) {
                         self.forget_original_state(note_window_id);
@@ -156,7 +163,7 @@ impl WindowSpaceBackend for MacOSWindowSpaceBackend {
                 .ok_or_else(unavailable)?;
             let sky_light = SkyLight::load()?;
             let connection = sky_light.connection()?;
-            sky_light.restore_window_state(connection, note_window_id, original_state)?;
+            sky_light.restore_complete_window_state(connection, note_window_id, original_state)?;
             self.forget_original_state(note_window_id);
             Ok(())
         }
@@ -188,6 +195,69 @@ impl WindowSpaceBackend for MacOSWindowSpaceBackend {
             let sky_light = SkyLight::load()?;
             let connection = sky_light.connection()?;
             sky_light.order_window(connection, note_window_id, ORDER_ABOVE, target_window_id)
+        }
+    }
+
+    fn promote(&self, target_window_id: u32, note_window_id: u32) -> AppResult<()> {
+        // SAFETY: this checks a scalar AppKit thread property before native work.
+        unsafe { require_main_thread()? };
+        unavailable_if_zero(target_window_id)?;
+        unavailable_if_zero(note_window_id)?;
+
+        let original_state = self
+            .original_state(note_window_id)
+            .ok_or_else(unavailable)?;
+        // SAFETY: dynamically resolved function pointers are invoked while their
+        // owning library is alive, and sublevel changes are verified by readback.
+        unsafe {
+            let sky_light = SkyLight::load()?;
+            let connection = sky_light.connection()?;
+            let promoted_sublevel =
+                promoted_sublevel(sky_light.window_sublevel(connection, target_window_id))?;
+            if let Err(error) = sky_light.set_window_sublevel_verified(
+                connection,
+                note_window_id,
+                promoted_sublevel,
+            ) {
+                let _ = sky_light.set_window_sublevel_verified(
+                    connection,
+                    note_window_id,
+                    original_state.sublevel,
+                );
+                return Err(error);
+            }
+            if let Err(error) =
+                sky_light.order_window(connection, note_window_id, ORDER_ABOVE, target_window_id)
+            {
+                let _ = sky_light.set_window_sublevel_verified(
+                    connection,
+                    note_window_id,
+                    original_state.sublevel,
+                );
+                return Err(error);
+            }
+            Ok(())
+        }
+    }
+
+    fn restore_ordering(&self, note_window_id: u32) -> AppResult<()> {
+        // SAFETY: this checks a scalar AppKit thread property before native work.
+        unsafe { require_main_thread()? };
+        unavailable_if_zero(note_window_id)?;
+        let Some(original_state) = self.original_state(note_window_id) else {
+            return Ok(());
+        };
+
+        // SAFETY: dynamically resolved function pointers are invoked while their
+        // owning library is alive, and the change is verified by readback.
+        unsafe {
+            let sky_light = SkyLight::load()?;
+            let connection = sky_light.connection()?;
+            sky_light.set_window_sublevel_verified(
+                connection,
+                note_window_id,
+                original_state.sublevel,
+            )
         }
     }
 }
@@ -244,6 +314,8 @@ struct SkyLight {
     copy_spaces_for_windows: CopySpacesForWindows,
     move_windows_to_managed_space: MoveWindowsToManagedSpace,
     order_window: OrderWindow,
+    get_window_sublevel: GetWindowSubLevel,
+    set_window_sublevel: SetWindowSubLevel,
 }
 
 impl SkyLight {
@@ -274,6 +346,16 @@ impl SkyLight {
                 .map_err(|_| unavailable())?;
             *symbol
         };
+        let get_window_sublevel = {
+            let symbol = unsafe { library.get::<GetWindowSubLevel>(b"SLSGetWindowSubLevel\0") }
+                .map_err(|_| unavailable())?;
+            *symbol
+        };
+        let set_window_sublevel = {
+            let symbol = unsafe { library.get::<SetWindowSubLevel>(b"SLSSetWindowSubLevel\0") }
+                .map_err(|_| unavailable())?;
+            *symbol
+        };
 
         Ok(Self {
             _library: library,
@@ -281,6 +363,8 @@ impl SkyLight {
             copy_spaces_for_windows,
             move_windows_to_managed_space,
             order_window,
+            get_window_sublevel,
+            set_window_sublevel,
         })
     }
 
@@ -391,6 +475,37 @@ impl SkyLight {
         behavior_result
     }
 
+    unsafe fn restore_complete_window_state(
+        &self,
+        connection: u32,
+        window_id: u32,
+        state: OriginalWindowState,
+    ) -> AppResult<()> {
+        let ordering_result =
+            unsafe { self.set_window_sublevel_verified(connection, window_id, state.sublevel) };
+        let window_result = unsafe { self.restore_window_state(connection, window_id, state) };
+        ordering_result?;
+        window_result
+    }
+
+    unsafe fn window_sublevel(&self, connection: u32, window_id: u32) -> i32 {
+        unsafe { (self.get_window_sublevel)(connection, window_id) }
+    }
+
+    unsafe fn set_window_sublevel_verified(
+        &self,
+        connection: u32,
+        window_id: u32,
+        sublevel: i32,
+    ) -> AppResult<()> {
+        unsafe { (self.set_window_sublevel)(connection, window_id, sublevel) };
+        if unsafe { self.window_sublevel(connection, window_id) } == sublevel {
+            Ok(())
+        } else {
+            Err(unavailable())
+        }
+    }
+
     unsafe fn order_window(
         &self,
         connection: u32,
@@ -492,6 +607,10 @@ fn success_or_unavailable(code: i32) -> AppResult<()> {
     }
 }
 
+fn promoted_sublevel(target_sublevel: i32) -> AppResult<i32> {
+    target_sublevel.checked_add(1).ok_or_else(unavailable)
+}
+
 fn unavailable_if_zero<T>(value: T) -> AppResult<()>
 where
     T: PartialEq + From<u8>,
@@ -558,10 +677,12 @@ mod tests {
         let first = OriginalWindowState {
             space_id: 30,
             collection_behavior: 10,
+            sublevel: 0,
         };
         let rebind = OriginalWindowState {
             space_id: 40,
             collection_behavior: 20,
+            sublevel: 1,
         };
 
         backend.remember_original_state(20, first);
@@ -594,5 +715,12 @@ mod tests {
     #[test]
     fn silent_move_noop_fails_the_readback_contract() {
         assert!(!placement(30, 40, 40).placement_verified());
+    }
+
+    #[test]
+    fn promotion_is_exactly_one_sublevel_above_target() {
+        assert_eq!(promoted_sublevel(0).unwrap(), 1);
+        assert_eq!(promoted_sublevel(-1).unwrap(), 0);
+        assert!(promoted_sublevel(i32::MAX).is_err());
     }
 }

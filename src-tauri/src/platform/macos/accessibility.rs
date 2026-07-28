@@ -6,9 +6,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use libloading::Library;
-use objc2::rc::autoreleasepool;
-use objc2::runtime::AnyObject;
-use objc2::{class, msg_send};
+use objc2::rc::{autoreleasepool, Allocated, Retained};
+use objc2::runtime::{AnyObject, NSObject};
+use objc2::{
+    class, declare_class, msg_send, msg_send_id, mutability, sel, ClassType, DeclaredClass,
+};
 
 use crate::assignment::coordinator::{ObserverFactory, ObserverRegistration};
 use crate::assignment::BindingEvent;
@@ -32,6 +34,11 @@ extern "C" {
         index: isize,
         max_values: isize,
         values: *mut *mut c_void,
+    ) -> i32;
+    fn AXUIElementCopyAttributeValue(
+        element: *const c_void,
+        attribute: *const c_void,
+        value: *mut *mut c_void,
     ) -> i32;
     fn AXObserverCreate(pid: i32, callback: AxObserverCallback, observer: *mut *mut c_void) -> i32;
     fn AXObserverAddNotification(
@@ -81,14 +88,69 @@ const APPLICATION_SERVICES_PATH: &str =
     "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices";
 
 const AX_WINDOWS_ATTRIBUTE: &[u8] = b"AXWindows\0";
+const AX_FOCUSED_WINDOW_ATTRIBUTE: &[u8] = b"AXFocusedWindow\0";
+const AX_FULLSCREEN_ATTRIBUTE: &[u8] = b"AXFullScreen\0";
 const AX_DESTROYED_NOTIFICATION: &[u8] = b"AXUIElementDestroyed\0";
 const AX_MINIMIZED_NOTIFICATION: &[u8] = b"AXWindowMiniaturized\0";
 const AX_RESTORED_NOTIFICATION: &[u8] = b"AXWindowDeminiaturized\0";
 const AX_RESIZED_NOTIFICATION: &[u8] = b"AXResized\0";
 const AX_FULLSCREEN_NOTIFICATION: &[u8] = b"AXFullScreenChanged\0";
 const AX_APPLICATION_ACTIVATED_NOTIFICATION: &[u8] = b"AXApplicationActivated\0";
+const AX_APPLICATION_DEACTIVATED_NOTIFICATION: &[u8] = b"AXApplicationDeactivated\0";
 const AX_FOCUSED_WINDOW_CHANGED_NOTIFICATION: &[u8] = b"AXFocusedWindowChanged\0";
 const AX_MAIN_WINDOW_CHANGED_NOTIFICATION: &[u8] = b"AXMainWindowChanged\0";
+const NS_WORKSPACE_DID_ACTIVATE_APPLICATION_NOTIFICATION: &[u8] =
+    b"NSWorkspaceDidActivateApplicationNotification\0";
+
+struct WorkspaceActivationIvars {
+    pid: i32,
+    target_window_id: u32,
+    callback: Arc<dyn Fn(BindingEvent) + Send + Sync>,
+}
+
+declare_class!(
+    struct WorkspaceActivationObserver;
+
+    // SAFETY: NSObject has no subclassing requirements and the ivars are only
+    // read after initialization. Notification delivery occurs on the main thread.
+    unsafe impl ClassType for WorkspaceActivationObserver {
+        type Super = NSObject;
+        type Mutability = mutability::InteriorMutable;
+        const NAME: &'static str = "FloatyWorkspaceActivationObserver";
+    }
+
+    impl DeclaredClass for WorkspaceActivationObserver {
+        type Ivars = WorkspaceActivationIvars;
+    }
+
+    unsafe impl WorkspaceActivationObserver {
+        #[method(workspaceApplicationActivated:)]
+        fn workspace_application_activated(&self, _notification: *mut AnyObject) {
+            let ivars = self.ivars();
+            (ivars.callback)(target_focus_event(ivars.pid, ivars.target_window_id));
+        }
+    }
+);
+
+impl WorkspaceActivationObserver {
+    fn new(
+        pid: i32,
+        target_window_id: u32,
+        callback: Arc<dyn Fn(BindingEvent) + Send + Sync>,
+    ) -> Retained<Self> {
+        // SAFETY: the declared class initializes its ivars before invoking
+        // NSObject's designated initializer.
+        unsafe {
+            let allocated: Allocated<Self> = msg_send_id![Self::class(), alloc];
+            let initialized = allocated.set_ivars(WorkspaceActivationIvars {
+                pid,
+                target_window_id,
+                callback,
+            });
+            msg_send_id![super(initialized), init]
+        }
+    }
+}
 
 /// Checks the current trust state without presenting a system prompt.
 pub fn status() -> AccessibilityStatus {
@@ -215,6 +277,7 @@ impl ObserverFactory for MacOSAccessibilityObserverFactory {
         .await?;
 
         let permission_callback = callback.clone();
+        let correction_app = self.app.clone();
         let permission_task = tauri::async_runtime::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
             interval.tick().await;
@@ -223,6 +286,13 @@ impl ObserverFactory for MacOSAccessibilityObserverFactory {
                 if status() != AccessibilityStatus::Granted {
                     permission_callback(BindingEvent::PermissionRevoked);
                     break;
+                }
+                let correction = run_on_main_thread(&correction_app, move || {
+                    Ok(target_focus_event(pid, window_id))
+                })
+                .await;
+                if let Ok(event) = correction {
+                    permission_callback(event);
                 }
             }
         });
@@ -288,6 +358,8 @@ thread_local! {
 }
 
 struct ObserverContext {
+    pid: i32,
+    target_window_id: u32,
     callback: Arc<dyn Fn(BindingEvent) + Send + Sync>,
 }
 
@@ -297,6 +369,7 @@ struct NativeObserver {
     window: *mut c_void,
     notifications: Vec<NativeNotification>,
     context: Box<ObserverContext>,
+    workspace_activation_observer: Option<Retained<WorkspaceActivationObserver>>,
     source_installed: bool,
 }
 
@@ -331,7 +404,12 @@ impl NativeObserver {
             application,
             window,
             notifications: Vec::new(),
-            context: Box::new(ObserverContext { callback }),
+            context: Box::new(ObserverContext {
+                pid,
+                target_window_id: window_id,
+                callback: callback.clone(),
+            }),
+            workspace_activation_observer: None,
             source_installed: false,
         };
         let required = [
@@ -346,6 +424,7 @@ impl NativeObserver {
         unsafe { native.add_notification(native.window, AX_FULLSCREEN_NOTIFICATION, true)? };
         for notification in [
             AX_APPLICATION_ACTIVATED_NOTIFICATION,
+            AX_APPLICATION_DEACTIVATED_NOTIFICATION,
             AX_FOCUSED_WINDOW_CHANGED_NOTIFICATION,
             AX_MAIN_WINDOW_CHANGED_NOTIFICATION,
         ] {
@@ -359,6 +438,8 @@ impl NativeObserver {
         }
         unsafe { CFRunLoopAddSource(run_loop, source, kCFRunLoopDefaultMode) };
         native.source_installed = true;
+        native.workspace_activation_observer =
+            Some(unsafe { install_workspace_activation_observer(pid, window_id, callback) });
         Ok(native)
     }
 
@@ -393,6 +474,9 @@ impl Drop for NativeObserver {
     fn drop(&mut self) {
         debug_assert!(require_main_thread().is_ok());
         unsafe {
+            if let Some(observer) = self.workspace_activation_observer.take() {
+                remove_workspace_activation_observer(&observer);
+            }
             let source = AXObserverGetRunLoopSource(self.observer);
             let run_loop = CFRunLoopGetMain();
             if self.source_installed && !source.is_null() && !run_loop.is_null() {
@@ -413,6 +497,41 @@ impl Drop for NativeObserver {
     }
 }
 
+unsafe fn install_workspace_activation_observer(
+    pid: i32,
+    target_window_id: u32,
+    callback: Arc<dyn Fn(BindingEvent) + Send + Sync>,
+) -> Retained<WorkspaceActivationObserver> {
+    let observer = WorkspaceActivationObserver::new(pid, target_window_id, callback);
+    let workspace: *mut AnyObject = unsafe { msg_send![class!(NSWorkspace), sharedWorkspace] };
+    let center: *mut AnyObject = unsafe { msg_send![workspace, notificationCenter] };
+    let name = unsafe { ns_string(NS_WORKSPACE_DID_ACTIVATE_APPLICATION_NOTIFICATION) };
+    unsafe {
+        let _: () = msg_send![
+            center,
+            addObserver: &*observer,
+            selector: sel!(workspaceApplicationActivated:),
+            name: name,
+            object: std::ptr::null::<AnyObject>()
+        ];
+    }
+    observer
+}
+
+unsafe fn remove_workspace_activation_observer(observer: &WorkspaceActivationObserver) {
+    let workspace: *mut AnyObject = unsafe { msg_send![class!(NSWorkspace), sharedWorkspace] };
+    let center: *mut AnyObject = unsafe { msg_send![workspace, notificationCenter] };
+    let name = unsafe { ns_string(NS_WORKSPACE_DID_ACTIVATE_APPLICATION_NOTIFICATION) };
+    unsafe {
+        let _: () = msg_send![
+            center,
+            removeObserver: observer,
+            name: name,
+            object: std::ptr::null::<AnyObject>()
+        ];
+    }
+}
+
 unsafe extern "C" fn observer_callback(
     _observer: *mut c_void,
     _element: *mut c_void,
@@ -422,14 +541,26 @@ unsafe extern "C" fn observer_callback(
     if notification.is_null() || refcon.is_null() {
         return;
     }
-    let Some(event) = (unsafe { notification_event(notification) }) else {
+    let Some(kind) = (unsafe { notification_kind(notification) }) else {
         return;
     };
     let context = unsafe { &*(refcon.cast::<ObserverContext>()) };
+    let event = match kind {
+        NativeNotificationKind::Event(event) => event,
+        NativeNotificationKind::EvaluateFocus => {
+            target_focus_event(context.pid, context.target_window_id)
+        }
+    };
     (context.callback)(event);
 }
 
-unsafe fn notification_event(notification: *const c_void) -> Option<BindingEvent> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NativeNotificationKind {
+    Event(BindingEvent),
+    EvaluateFocus,
+}
+
+unsafe fn notification_kind(notification: *const c_void) -> Option<NativeNotificationKind> {
     let mut buffer = [0_i8; 96];
     let copied = unsafe {
         CFStringGetCString(
@@ -444,15 +575,126 @@ unsafe fn notification_event(notification: *const c_void) -> Option<BindingEvent
     }
     let name = unsafe { std::ffi::CStr::from_ptr(buffer.as_ptr()) }.to_bytes();
     match name {
-        b"AXUIElementDestroyed" => Some(BindingEvent::TargetClosed),
-        b"AXWindowMiniaturized" => Some(BindingEvent::TargetMinimized),
-        b"AXWindowDeminiaturized" => Some(BindingEvent::TargetRestored),
-        b"AXResized" | b"AXFullScreenChanged" => Some(BindingEvent::TargetSpaceChanged),
+        b"AXUIElementDestroyed" => Some(NativeNotificationKind::Event(BindingEvent::TargetClosed)),
+        b"AXWindowMiniaturized" => {
+            Some(NativeNotificationKind::Event(BindingEvent::TargetMinimized))
+        }
+        b"AXWindowDeminiaturized" => {
+            Some(NativeNotificationKind::Event(BindingEvent::TargetRestored))
+        }
+        b"AXResized" | b"AXFullScreenChanged" => Some(NativeNotificationKind::Event(
+            BindingEvent::TargetSpaceChanged,
+        )),
+        b"AXApplicationDeactivated" => {
+            Some(NativeNotificationKind::Event(BindingEvent::TargetUnfocused))
+        }
         b"AXApplicationActivated" | b"AXFocusedWindowChanged" | b"AXMainWindowChanged" => {
-            Some(BindingEvent::TargetOrderChanged)
+            Some(NativeNotificationKind::EvaluateFocus)
         }
         _ => None,
     }
+}
+
+fn target_focus_event(pid: i32, target_window_id: u32) -> BindingEvent {
+    let frontmost_pid = frontmost_application_pid();
+    if frontmost_pid != Some(pid) {
+        return BindingEvent::TargetUnfocused;
+    }
+
+    let (focused_window_id, is_fullscreen) = unsafe { focused_window_state(pid) };
+    focus_event(
+        frontmost_pid,
+        pid,
+        focused_window_id,
+        target_window_id,
+        is_fullscreen,
+    )
+}
+
+fn focus_event(
+    frontmost_pid: Option<i32>,
+    target_pid: i32,
+    focused_window_id: Option<u32>,
+    target_window_id: u32,
+    is_fullscreen: Option<bool>,
+) -> BindingEvent {
+    if frontmost_pid == Some(target_pid)
+        && focused_window_id == Some(target_window_id)
+        && is_fullscreen == Some(false)
+    {
+        BindingEvent::TargetFocused
+    } else {
+        BindingEvent::TargetUnfocused
+    }
+}
+
+fn frontmost_application_pid() -> Option<i32> {
+    autoreleasepool(|_| {
+        // SAFETY: callers run this on the main thread. The returned application
+        // is autoreleased and only its scalar process identifier leaves the pool.
+        unsafe {
+            let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+            let application: *mut AnyObject = msg_send![workspace, frontmostApplication];
+            if application.is_null() {
+                None
+            } else {
+                Some(msg_send![application, processIdentifier])
+            }
+        }
+    })
+}
+
+unsafe fn focused_window_state(pid: i32) -> (Option<u32>, Option<bool>) {
+    let application = unsafe { AXUIElementCreateApplication(pid) };
+    if application.is_null() {
+        return (None, None);
+    }
+    let attribute = match unsafe { cf_string(AX_FOCUSED_WINDOW_ATTRIBUTE) } {
+        Ok(attribute) => attribute,
+        Err(_) => {
+            unsafe { CFRelease(application.cast_const()) };
+            return (None, None);
+        }
+    };
+    let mut focused_window: *mut c_void = std::ptr::null_mut();
+    let copy_result =
+        unsafe { AXUIElementCopyAttributeValue(application, attribute, &mut focused_window) };
+    unsafe { CFRelease(attribute.cast_const()) };
+    unsafe { CFRelease(application.cast_const()) };
+    if copy_result != AX_SUCCESS || focused_window.is_null() {
+        if !focused_window.is_null() {
+            unsafe { CFRelease(focused_window.cast_const()) };
+        }
+        return (None, None);
+    }
+
+    let window_id = unsafe { copy_window_id(focused_window) };
+    let is_fullscreen = unsafe { copy_ax_bool(focused_window, AX_FULLSCREEN_ATTRIBUTE) };
+    unsafe { CFRelease(focused_window.cast_const()) };
+    (window_id, is_fullscreen)
+}
+
+unsafe fn copy_window_id(window: *const c_void) -> Option<u32> {
+    let window_id_api = unsafe { WindowIdApi::load() }.ok()?;
+    let mut window_id = 0_u32;
+    let result = unsafe { (window_id_api.get_window)(window, &mut window_id) };
+    (result == AX_SUCCESS).then_some(window_id)
+}
+
+unsafe fn copy_ax_bool(element: *const c_void, attribute_name: &'static [u8]) -> Option<bool> {
+    let attribute = unsafe { cf_string(attribute_name) }.ok()?;
+    let mut value: *mut c_void = std::ptr::null_mut();
+    let result = unsafe { AXUIElementCopyAttributeValue(element, attribute, &mut value) };
+    unsafe { CFRelease(attribute.cast_const()) };
+    if result != AX_SUCCESS || value.is_null() {
+        if !value.is_null() {
+            unsafe { CFRelease(value.cast_const()) };
+        }
+        return None;
+    }
+    let result: bool = unsafe { msg_send![value.cast::<AnyObject>(), boolValue] };
+    unsafe { CFRelease(value.cast_const()) };
+    Some(result)
 }
 
 unsafe fn copy_exact_window(pid: i32, expected_window_id: u32) -> AppResult<*mut c_void> {
@@ -591,32 +833,40 @@ mod tests {
 
     #[test]
     fn observer_notifications_map_to_semantic_binding_events() {
-        unsafe fn event(name: &'static [u8]) -> Option<BindingEvent> {
+        unsafe fn kind(name: &'static [u8]) -> Option<NativeNotificationKind> {
             let notification = unsafe { cf_string(name).unwrap() };
-            let event = unsafe { notification_event(notification) };
+            let kind = unsafe { notification_kind(notification) };
             unsafe { CFRelease(notification.cast_const()) };
-            event
+            kind
         }
 
         assert_eq!(
-            unsafe { event(AX_DESTROYED_NOTIFICATION) },
-            Some(BindingEvent::TargetClosed)
+            unsafe { kind(AX_DESTROYED_NOTIFICATION) },
+            Some(NativeNotificationKind::Event(BindingEvent::TargetClosed))
         );
         assert_eq!(
-            unsafe { event(AX_MINIMIZED_NOTIFICATION) },
-            Some(BindingEvent::TargetMinimized)
+            unsafe { kind(AX_MINIMIZED_NOTIFICATION) },
+            Some(NativeNotificationKind::Event(BindingEvent::TargetMinimized))
         );
         assert_eq!(
-            unsafe { event(AX_RESTORED_NOTIFICATION) },
-            Some(BindingEvent::TargetRestored)
+            unsafe { kind(AX_RESTORED_NOTIFICATION) },
+            Some(NativeNotificationKind::Event(BindingEvent::TargetRestored))
         );
         assert_eq!(
-            unsafe { event(AX_RESIZED_NOTIFICATION) },
-            Some(BindingEvent::TargetSpaceChanged)
+            unsafe { kind(AX_RESIZED_NOTIFICATION) },
+            Some(NativeNotificationKind::Event(
+                BindingEvent::TargetSpaceChanged
+            ))
         );
         assert_eq!(
-            unsafe { event(AX_FULLSCREEN_NOTIFICATION) },
-            Some(BindingEvent::TargetSpaceChanged)
+            unsafe { kind(AX_FULLSCREEN_NOTIFICATION) },
+            Some(NativeNotificationKind::Event(
+                BindingEvent::TargetSpaceChanged
+            ))
+        );
+        assert_eq!(
+            unsafe { kind(AX_APPLICATION_DEACTIVATED_NOTIFICATION) },
+            Some(NativeNotificationKind::Event(BindingEvent::TargetUnfocused))
         );
         for notification in [
             AX_APPLICATION_ACTIVATED_NOTIFICATION,
@@ -624,8 +874,44 @@ mod tests {
             AX_MAIN_WINDOW_CHANGED_NOTIFICATION,
         ] {
             assert_eq!(
-                unsafe { event(notification) },
-                Some(BindingEvent::TargetOrderChanged)
+                unsafe { kind(notification) },
+                Some(NativeNotificationKind::EvaluateFocus)
+            );
+        }
+    }
+
+    #[test]
+    fn focus_requires_frontmost_app_exact_window_and_non_fullscreen_state() {
+        let target_pid = 41;
+        let target_window_id = 73;
+
+        assert_eq!(
+            focus_event(
+                Some(target_pid),
+                target_pid,
+                Some(target_window_id),
+                target_window_id,
+                Some(false),
+            ),
+            BindingEvent::TargetFocused
+        );
+
+        for (frontmost_pid, focused_window_id, is_fullscreen) in [
+            (Some(99), Some(target_window_id), Some(false)),
+            (Some(target_pid), Some(88), Some(false)),
+            (Some(target_pid), None, Some(false)),
+            (Some(target_pid), Some(target_window_id), Some(true)),
+            (Some(target_pid), Some(target_window_id), None),
+        ] {
+            assert_eq!(
+                focus_event(
+                    frontmost_pid,
+                    target_pid,
+                    focused_window_id,
+                    target_window_id,
+                    is_fullscreen,
+                ),
+                BindingEvent::TargetUnfocused
             );
         }
     }

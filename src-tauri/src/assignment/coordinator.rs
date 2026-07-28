@@ -38,6 +38,8 @@ pub trait NativeWindowRuntime: Send + Sync {
     async fn detach(&self, sticky_id: &str) -> AppResult<()>;
     async fn suspend(&self, sticky_id: &str) -> AppResult<()>;
     async fn resume(&self, sticky_id: &str, target_window_id: u32) -> AppResult<()>;
+    async fn promote(&self, sticky_id: &str, target_window_id: u32) -> AppResult<()>;
+    async fn restore_ordering(&self, sticky_id: &str) -> AppResult<()>;
 }
 
 #[async_trait]
@@ -414,6 +416,9 @@ impl BindingCoordinator {
         let current = self.runtime_state(sticky_id, &binding).await?;
 
         match event {
+            BindingEvent::UserHidNote => {
+                self.inner.native.restore_ordering(sticky_id).await?;
+            }
             BindingEvent::TargetMinimized => {
                 if matches!(
                     current,
@@ -458,16 +463,20 @@ impl BindingCoordinator {
                 ) {
                     return Ok(());
                 }
+                self.inner.native.restore_ordering(sticky_id).await?;
                 self.reattach_exact_target(sticky_id, &binding).await?;
                 return Ok(());
             }
-            BindingEvent::TargetOrderChanged => {
+            BindingEvent::TargetFocused => {
                 if current == RuntimeState::Visible {
                     self.inner
                         .native
-                        .resume(sticky_id, active_window_id(&binding)?)
+                        .promote(sticky_id, active_window_id(&binding)?)
                         .await?;
                 }
+            }
+            BindingEvent::TargetUnfocused => {
+                self.inner.native.restore_ordering(sticky_id).await?;
             }
             BindingEvent::PermissionRevoked => {
                 let updated = self
@@ -487,9 +496,7 @@ impl BindingCoordinator {
                     return Err(error);
                 }
             }
-            BindingEvent::UserHidNote
-            | BindingEvent::UserOpenedNote
-            | BindingEvent::SimilarWindowOpened => {}
+            BindingEvent::UserOpenedNote | BindingEvent::SimilarWindowOpened => {}
         }
 
         self.set_runtime_state(sticky_id, state::reduce(current, event));
@@ -947,6 +954,42 @@ impl NativeWindowRuntime for TauriNativeWindowRuntime {
         })
         .await
     }
+
+    async fn promote(&self, sticky_id: &str, target_window_id: u32) -> AppResult<()> {
+        let sticky_id = sticky_id.to_owned();
+        run_on_main_thread(&self.app, {
+            let app = self.app.clone();
+            let spaces = self.spaces.clone();
+            move || {
+                use tauri::Manager;
+                let window = app
+                    .get_webview_window(&crate::windows::label(&sticky_id))
+                    .ok_or(AppError::NotFound)?;
+                let note_window_id =
+                    crate::platform::macos::window_spaces::note_window_id(&window)?;
+                spaces.promote(target_window_id, note_window_id)
+            }
+        })
+        .await
+    }
+
+    async fn restore_ordering(&self, sticky_id: &str) -> AppResult<()> {
+        let sticky_id = sticky_id.to_owned();
+        run_on_main_thread(&self.app, {
+            let app = self.app.clone();
+            let spaces = self.spaces.clone();
+            move || {
+                use tauri::Manager;
+                let window = app
+                    .get_webview_window(&crate::windows::label(&sticky_id))
+                    .ok_or(AppError::NotFound)?;
+                let note_window_id =
+                    crate::platform::macos::window_spaces::note_window_id(&window)?;
+                spaces.restore_ordering(note_window_id)
+            }
+        })
+        .await
+    }
 }
 
 pub struct TauriNoteWindowRuntime {
@@ -1170,6 +1213,8 @@ mod tests {
         Detach,
         Suspend,
         Resume(u32),
+        Promote(u32),
+        RestoreOrdering,
     }
 
     #[derive(Default)]
@@ -1228,6 +1273,19 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(NativeCall::Resume(target_window_id));
+            Ok(())
+        }
+
+        async fn promote(&self, _sticky_id: &str, target_window_id: u32) -> AppResult<()> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(NativeCall::Promote(target_window_id));
+            Ok(())
+        }
+
+        async fn restore_ordering(&self, _sticky_id: &str) -> AppResult<()> {
+            self.calls.lock().unwrap().push(NativeCall::RestoreOrdering);
             Ok(())
         }
     }
@@ -1476,25 +1534,28 @@ mod tests {
         );
         assert_eq!(
             *harness.native.calls.lock().unwrap(),
-            vec![NativeCall::Attach(TARGET_WINDOW_ID)]
+            vec![
+                NativeCall::RestoreOrdering,
+                NativeCall::Attach(TARGET_WINDOW_ID)
+            ]
         );
         assert_eq!(*harness.windows.geometry.lock().unwrap(), original_geometry);
     }
 
     #[tokio::test]
-    async fn target_reordering_places_only_a_visible_note_above_the_exact_target() {
+    async fn exact_target_focus_promotes_only_a_visible_note() {
         let visible = Harness::active(false);
         let original_geometry = *visible.windows.geometry.lock().unwrap();
 
         visible
             .coordinator
-            .handle(STICKY_ID, BindingEvent::TargetOrderChanged)
+            .handle(STICKY_ID, BindingEvent::TargetFocused)
             .await
             .unwrap();
 
         assert_eq!(
             *visible.native.calls.lock().unwrap(),
-            vec![NativeCall::Resume(TARGET_WINDOW_ID)]
+            vec![NativeCall::Promote(TARGET_WINDOW_ID)]
         );
         assert_eq!(*visible.windows.geometry.lock().unwrap(), original_geometry);
 
@@ -1509,7 +1570,7 @@ mod tests {
                 .set_runtime_state(STICKY_ID, state);
             hidden_or_suspended
                 .coordinator
-                .handle(STICKY_ID, BindingEvent::TargetOrderChanged)
+                .handle(STICKY_ID, BindingEvent::TargetFocused)
                 .await
                 .unwrap();
             assert!(hidden_or_suspended.native.calls.lock().unwrap().is_empty());
@@ -1518,6 +1579,44 @@ mod tests {
                 Some(state)
             );
         }
+    }
+
+    #[tokio::test]
+    async fn losing_exact_target_focus_restores_original_ordering_without_moving_note() {
+        let harness = Harness::active(false);
+        let original_geometry = *harness.windows.geometry.lock().unwrap();
+
+        harness
+            .coordinator
+            .handle(STICKY_ID, BindingEvent::TargetUnfocused)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            *harness.native.calls.lock().unwrap(),
+            vec![NativeCall::RestoreOrdering]
+        );
+        assert_eq!(*harness.windows.geometry.lock().unwrap(), original_geometry);
+    }
+
+    #[tokio::test]
+    async fn manually_hiding_note_restores_original_ordering() {
+        let harness = Harness::active(false);
+
+        harness
+            .coordinator
+            .handle(STICKY_ID, BindingEvent::UserHidNote)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            *harness.native.calls.lock().unwrap(),
+            vec![NativeCall::RestoreOrdering]
+        );
+        assert_eq!(
+            harness.coordinator.runtime_state_for(STICKY_ID),
+            Some(RuntimeState::ManuallyHidden)
+        );
     }
 
     #[tokio::test]
@@ -1535,6 +1634,7 @@ mod tests {
         assert_eq!(
             *harness.native.calls.lock().unwrap(),
             vec![
+                NativeCall::RestoreOrdering,
                 NativeCall::Attach(TARGET_WINDOW_ID),
                 NativeCall::Attach(TARGET_WINDOW_ID)
             ]
@@ -1585,7 +1685,7 @@ mod tests {
         );
         assert_eq!(
             *harness.native.calls.lock().unwrap(),
-            vec![NativeCall::Suspend]
+            vec![NativeCall::RestoreOrdering, NativeCall::Suspend]
         );
     }
 
@@ -1624,7 +1724,10 @@ mod tests {
             .lock()
             .unwrap()
             .contains_key(STICKY_ID));
-        assert!(harness.native.calls.lock().unwrap().is_empty());
+        assert_eq!(
+            *harness.native.calls.lock().unwrap(),
+            vec![NativeCall::RestoreOrdering]
+        );
     }
 
     #[tokio::test]

@@ -231,7 +231,10 @@ pub fn suspend_for_binding(
         .ok_or(AppError::NotFound)?;
     let note_window_id =
         crate::platform::macos::window_spaces::note_window_id(&window)?;
-    spaces.order_out(note_window_id)
+    let ordering_result = spaces.restore_ordering(note_window_id);
+    let order_out_result = spaces.order_out(note_window_id);
+    ordering_result?;
+    order_out_result
 }
 
 #[cfg(target_os = "macos")]

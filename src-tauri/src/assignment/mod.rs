@@ -69,7 +69,8 @@ pub enum BindingEvent {
     TargetRestored,
     TargetClosed,
     TargetSpaceChanged,
-    TargetOrderChanged,
+    TargetFocused,
+    TargetUnfocused,
     // Kept as an explicit no-op so tests guard the no-auto-match product rule.
     #[allow(dead_code)]
     SimilarWindowOpened,
