@@ -86,6 +86,9 @@ const AX_MINIMIZED_NOTIFICATION: &[u8] = b"AXWindowMiniaturized\0";
 const AX_RESTORED_NOTIFICATION: &[u8] = b"AXWindowDeminiaturized\0";
 const AX_RESIZED_NOTIFICATION: &[u8] = b"AXResized\0";
 const AX_FULLSCREEN_NOTIFICATION: &[u8] = b"AXFullScreenChanged\0";
+const AX_APPLICATION_ACTIVATED_NOTIFICATION: &[u8] = b"AXApplicationActivated\0";
+const AX_FOCUSED_WINDOW_CHANGED_NOTIFICATION: &[u8] = b"AXFocusedWindowChanged\0";
+const AX_MAIN_WINDOW_CHANGED_NOTIFICATION: &[u8] = b"AXMainWindowChanged\0";
 
 /// Checks the current trust state without presenting a system prompt.
 pub fn status() -> AccessibilityStatus {
@@ -290,10 +293,16 @@ struct ObserverContext {
 
 struct NativeObserver {
     observer: *mut c_void,
+    application: *mut c_void,
     window: *mut c_void,
-    notifications: Vec<*mut c_void>,
+    notifications: Vec<NativeNotification>,
     context: Box<ObserverContext>,
     source_installed: bool,
+}
+
+struct NativeNotification {
+    element: *mut c_void,
+    name: *mut c_void,
 }
 
 impl NativeObserver {
@@ -303,16 +312,23 @@ impl NativeObserver {
         callback: Arc<dyn Fn(BindingEvent) + Send + Sync>,
     ) -> AppResult<Self> {
         let window = unsafe { copy_exact_window(pid, window_id)? };
+        let application = unsafe { AXUIElementCreateApplication(pid) };
+        if application.is_null() {
+            unsafe { CFRelease(window.cast_const()) };
+            return Err(observer_unavailable());
+        }
         let mut observer: *mut c_void = std::ptr::null_mut();
         let create_result =
             unsafe { AXObserverCreate(pid, observer_callback, &mut observer as *mut *mut c_void) };
         if create_result != AX_SUCCESS || observer.is_null() {
+            unsafe { CFRelease(application.cast_const()) };
             unsafe { CFRelease(window.cast_const()) };
             return Err(observer_unavailable());
         }
 
         let mut native = Self {
             observer,
+            application,
             window,
             notifications: Vec::new(),
             context: Box::new(ObserverContext { callback }),
@@ -325,9 +341,16 @@ impl NativeObserver {
             AX_RESIZED_NOTIFICATION,
         ];
         for notification in required {
-            unsafe { native.add_notification(notification, false)? };
+            unsafe { native.add_notification(native.window, notification, false)? };
         }
-        unsafe { native.add_notification(AX_FULLSCREEN_NOTIFICATION, true)? };
+        unsafe { native.add_notification(native.window, AX_FULLSCREEN_NOTIFICATION, true)? };
+        for notification in [
+            AX_APPLICATION_ACTIVATED_NOTIFICATION,
+            AX_FOCUSED_WINDOW_CHANGED_NOTIFICATION,
+            AX_MAIN_WINDOW_CHANGED_NOTIFICATION,
+        ] {
+            unsafe { native.add_notification(native.application, notification, true)? };
+        }
 
         let source = unsafe { AXObserverGetRunLoopSource(native.observer) };
         let run_loop = unsafe { CFRunLoopGetMain() };
@@ -339,13 +362,21 @@ impl NativeObserver {
         Ok(native)
     }
 
-    unsafe fn add_notification(&mut self, name: &'static [u8], optional: bool) -> AppResult<()> {
+    unsafe fn add_notification(
+        &mut self,
+        element: *mut c_void,
+        name: &'static [u8],
+        optional: bool,
+    ) -> AppResult<()> {
         let notification = unsafe { cf_string(name)? };
         let context = (&mut *self.context as *mut ObserverContext).cast::<c_void>();
         let result =
-            unsafe { AXObserverAddNotification(self.observer, self.window, notification, context) };
+            unsafe { AXObserverAddNotification(self.observer, element, notification, context) };
         if result == AX_SUCCESS {
-            self.notifications.push(notification);
+            self.notifications.push(NativeNotification {
+                element,
+                name: notification,
+            });
             Ok(())
         } else {
             unsafe { CFRelease(notification.cast_const()) };
@@ -368,9 +399,14 @@ impl Drop for NativeObserver {
                 CFRunLoopRemoveSource(run_loop, source, kCFRunLoopDefaultMode);
             }
             for notification in self.notifications.drain(..) {
-                let _ = AXObserverRemoveNotification(self.observer, self.window, notification);
-                CFRelease(notification.cast_const());
+                let _ = AXObserverRemoveNotification(
+                    self.observer,
+                    notification.element,
+                    notification.name,
+                );
+                CFRelease(notification.name.cast_const());
             }
+            CFRelease(self.application.cast_const());
             CFRelease(self.window.cast_const());
             CFRelease(self.observer.cast_const());
         }
@@ -412,6 +448,9 @@ unsafe fn notification_event(notification: *const c_void) -> Option<BindingEvent
         b"AXWindowMiniaturized" => Some(BindingEvent::TargetMinimized),
         b"AXWindowDeminiaturized" => Some(BindingEvent::TargetRestored),
         b"AXResized" | b"AXFullScreenChanged" => Some(BindingEvent::TargetSpaceChanged),
+        b"AXApplicationActivated" | b"AXFocusedWindowChanged" | b"AXMainWindowChanged" => {
+            Some(BindingEvent::TargetOrderChanged)
+        }
         _ => None,
     }
 }
@@ -579,5 +618,15 @@ mod tests {
             unsafe { event(AX_FULLSCREEN_NOTIFICATION) },
             Some(BindingEvent::TargetSpaceChanged)
         );
+        for notification in [
+            AX_APPLICATION_ACTIVATED_NOTIFICATION,
+            AX_FOCUSED_WINDOW_CHANGED_NOTIFICATION,
+            AX_MAIN_WINDOW_CHANGED_NOTIFICATION,
+        ] {
+            assert_eq!(
+                unsafe { event(notification) },
+                Some(BindingEvent::TargetOrderChanged)
+            );
+        }
     }
 }

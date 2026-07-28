@@ -31,7 +31,7 @@ pub fn reduce(state: RuntimeState, event: BindingEvent) -> RuntimeState {
             | RuntimeState::SuspendedManuallyHidden => RuntimeState::TargetClosed,
             unavailable => unavailable,
         },
-        BindingEvent::TargetSpaceChanged => state,
+        BindingEvent::TargetSpaceChanged | BindingEvent::TargetOrderChanged => state,
         BindingEvent::SimilarWindowOpened => state,
         BindingEvent::PermissionRevoked => RuntimeState::Unavailable,
     }
@@ -162,6 +162,7 @@ mod tests {
                 target_closed,
                 visible,
                 visible,
+                visible,
                 unavailable,
             ],
             [
@@ -172,6 +173,7 @@ mod tests {
                 target_closed,
                 suspended,
                 suspended,
+                suspended,
                 unavailable,
             ],
             [
@@ -180,6 +182,7 @@ mod tests {
                 suspended_manually_hidden,
                 manually_hidden,
                 target_closed,
+                manually_hidden,
                 manually_hidden,
                 manually_hidden,
                 unavailable,
@@ -192,6 +195,7 @@ mod tests {
                 target_closed,
                 suspended_manually_hidden,
                 suspended_manually_hidden,
+                suspended_manually_hidden,
                 unavailable,
             ],
             [
@@ -202,6 +206,7 @@ mod tests {
                 target_closed,
                 target_closed,
                 target_closed,
+                target_closed,
                 unavailable,
             ],
             [
@@ -212,9 +217,11 @@ mod tests {
                 reconnect_required,
                 reconnect_required,
                 reconnect_required,
+                reconnect_required,
                 unavailable,
             ],
             [
+                unavailable,
                 unavailable,
                 unavailable,
                 unavailable,
@@ -249,7 +256,7 @@ mod tests {
         ]
     }
 
-    fn all_events() -> [BindingEvent; 8] {
+    fn all_events() -> [BindingEvent; 9] {
         [
             BindingEvent::UserHidNote,
             BindingEvent::UserOpenedNote,
@@ -257,6 +264,7 @@ mod tests {
             BindingEvent::TargetRestored,
             BindingEvent::TargetClosed,
             BindingEvent::TargetSpaceChanged,
+            BindingEvent::TargetOrderChanged,
             BindingEvent::SimilarWindowOpened,
             BindingEvent::PermissionRevoked,
         ]

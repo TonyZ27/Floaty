@@ -461,6 +461,14 @@ impl BindingCoordinator {
                 self.reattach_exact_target(sticky_id, &binding).await?;
                 return Ok(());
             }
+            BindingEvent::TargetOrderChanged => {
+                if current == RuntimeState::Visible {
+                    self.inner
+                        .native
+                        .resume(sticky_id, active_window_id(&binding)?)
+                        .await?;
+                }
+            }
             BindingEvent::PermissionRevoked => {
                 let updated = self
                     .inner
@@ -1471,6 +1479,45 @@ mod tests {
             vec![NativeCall::Attach(TARGET_WINDOW_ID)]
         );
         assert_eq!(*harness.windows.geometry.lock().unwrap(), original_geometry);
+    }
+
+    #[tokio::test]
+    async fn target_reordering_places_only_a_visible_note_above_the_exact_target() {
+        let visible = Harness::active(false);
+        let original_geometry = *visible.windows.geometry.lock().unwrap();
+
+        visible
+            .coordinator
+            .handle(STICKY_ID, BindingEvent::TargetOrderChanged)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            *visible.native.calls.lock().unwrap(),
+            vec![NativeCall::Resume(TARGET_WINDOW_ID)]
+        );
+        assert_eq!(*visible.windows.geometry.lock().unwrap(), original_geometry);
+
+        for state in [
+            RuntimeState::ManuallyHidden,
+            RuntimeState::Suspended,
+            RuntimeState::SuspendedManuallyHidden,
+        ] {
+            let hidden_or_suspended = Harness::active(state == RuntimeState::ManuallyHidden);
+            hidden_or_suspended
+                .coordinator
+                .set_runtime_state(STICKY_ID, state);
+            hidden_or_suspended
+                .coordinator
+                .handle(STICKY_ID, BindingEvent::TargetOrderChanged)
+                .await
+                .unwrap();
+            assert!(hidden_or_suspended.native.calls.lock().unwrap().is_empty());
+            assert_eq!(
+                hidden_or_suspended.coordinator.runtime_state_for(STICKY_ID),
+                Some(state)
+            );
+        }
     }
 
     #[tokio::test]
