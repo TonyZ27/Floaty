@@ -8,32 +8,23 @@ on:
     inputs:
       tag:
         description: "Existing release tag to upload artifacts + manifest to"
-        required: false
-        default: ""
+        required: true
 
 jobs:
   build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: macos-14
-            target: aarch64-apple-darwin
-            manifest_key: darwin-aarch64
-          - platform: windows-latest
-            target: x86_64-pc-windows-msvc
-            manifest_key: windows-x86_64
-    runs-on: ${{ matrix.platform }}
+    runs-on: macos-14
     permissions:
       contents: write
     env:
-      DISPATCH_TAG: ${{ inputs.tag }}
+      RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
       TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
-      TARGET: ${{ matrix.target }}
+      TARGET: aarch64-apple-darwin
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.sha }}
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -44,7 +35,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ env.TARGET }}
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
@@ -58,8 +49,7 @@ jobs:
         run: npm run tauri build -- --target "$TARGET"
         shell: bash
 
-      - name: Collect artifacts (macOS)
-        if: runner.os == 'macOS'
+      - name: Collect macOS artifacts
         shell: bash
         run: |
           set -euo pipefail
@@ -70,39 +60,32 @@ jobs:
           cp "$BUNDLE"/macos/*.app.tar.gz.sig release-assets/
           ls -la release-assets/
 
-      - name: Collect artifacts (Windows)
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          set -euo pipefail
-          BUNDLE="src-tauri/target/${TARGET}/release/bundle"
-          echo "--- bundle tree ---"
-          find "$BUNDLE" -maxdepth 3 -type f | sort
-          mkdir -p release-assets
-          cp "$BUNDLE"/msi/*.msi release-assets/
-          cp "$BUNDLE"/nsis/*-setup.exe release-assets/
-          cp "$BUNDLE"/nsis/*-setup.exe.sig release-assets/
-          ls -la release-assets/
-
       - name: Upload bundle artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: floaty-${{ matrix.manifest_key }}
+          name: floaty-darwin-aarch64
           path: release-assets/*
           if-no-files-found: error
 
-      - name: Attach to release (tag push)
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: release-assets/*
-          fail_on_unmatched_files: false
+      - name: Prepare release notes
+        if: env.RELEASE_TAG != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          NOTES_PATH="docs/releases/${RELEASE_TAG}.md"
+          if [[ -f "$NOTES_PATH" ]]; then
+            cp "$NOTES_PATH" release-notes.md
+          else
+            printf 'See https://github.com/%s/releases/tag/%s\n' \
+              "${{ github.repository }}" "$RELEASE_TAG" > release-notes.md
+          fi
 
-      - name: Attach to release (manual dispatch)
-        if: github.event_name == 'workflow_dispatch' && env.DISPATCH_TAG != ''
+      - name: Attach macOS assets and release notes
+        if: env.RELEASE_TAG != ''
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ env.DISPATCH_TAG }}
+          tag_name: ${{ env.RELEASE_TAG }}
+          body_path: release-notes.md
           files: release-assets/*
           fail_on_unmatched_files: false
 
@@ -130,13 +113,9 @@ jobs:
 
           MAC_BUNDLE=$(find bundles/floaty-darwin-aarch64 -name '*.app.tar.gz' | head -n 1)
           MAC_SIG_FILE="${MAC_BUNDLE}.sig"
-          WIN_BUNDLE=$(find bundles/floaty-windows-x86_64 -name '*-setup.exe' | head -n 1)
-          WIN_SIG_FILE="${WIN_BUNDLE}.sig"
 
           MAC_FILE=$(basename "$MAC_BUNDLE")
-          WIN_FILE=$(basename "$WIN_BUNDLE")
           MAC_SIG=$(cat "$MAC_SIG_FILE")
-          WIN_SIG=$(cat "$WIN_SIG_FILE")
 
           jq -n \
             --arg version "$VERSION" \
@@ -144,15 +123,12 @@ jobs:
             --arg pub_date "$PUB_DATE" \
             --arg mac_sig "$MAC_SIG" \
             --arg mac_url "https://github.com/$REPO/releases/download/$TAG/$MAC_FILE" \
-            --arg win_sig "$WIN_SIG" \
-            --arg win_url "https://github.com/$REPO/releases/download/$TAG/$WIN_FILE" \
             '{
               version: $version,
               notes: $notes,
               pub_date: $pub_date,
               platforms: {
-                "darwin-aarch64": { signature: $mac_sig, url: $mac_url },
-                "windows-x86_64": { signature: $win_sig, url: $win_url }
+                "darwin-aarch64": { signature: $mac_sig, url: $mac_url }
               }
             }' > latest.json
 
