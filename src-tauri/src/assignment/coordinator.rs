@@ -1051,9 +1051,7 @@ impl NoteWindowRuntime for TauriNoteWindowRuntime {
             .app
             .get_webview_window(&crate::windows::label(sticky_id))
             .ok_or(AppError::NotFound)?;
-        window
-            .set_always_on_top(false)
-            .map_err(|error| AppError::Other(format!("disable global pinning: {error}")))
+        crate::windows::apply_pinning_runtime(&self.app, &window, false).await
     }
 
     async fn restore_unbound_pinning(&self, sticky_id: &str) -> AppResult<()> {
@@ -1063,9 +1061,8 @@ impl NoteWindowRuntime for TauriNoteWindowRuntime {
             .app
             .get_webview_window(&crate::windows::label(sticky_id))
         {
-            window
-                .set_always_on_top(sticky.pinned == 1)
-                .map_err(|error| AppError::Other(format!("restore global pinning: {error}")))?;
+            crate::windows::apply_pinning_runtime(&self.app, &window, sticky.pinned == 1)
+                .await?;
         }
         Ok(())
     }

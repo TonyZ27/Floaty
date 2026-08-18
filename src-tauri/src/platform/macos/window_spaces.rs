@@ -311,6 +311,24 @@ pub fn note_window_id(window: &tauri::WebviewWindow) -> AppResult<u32> {
         .ok_or_else(unavailable)
 }
 
+/// Lets an unbound, globally pinned Note remain visible in full-screen Spaces.
+///
+/// Tauri manages `CanJoinAllSpaces` through its public window API. This only
+/// adds or removes the macOS-specific full-screen auxiliary behavior.
+pub fn set_note_full_screen_auxiliary(
+    window: &tauri::WebviewWindow,
+    enabled: bool,
+) -> AppResult<()> {
+    let window_id = note_window_id(window)?;
+    unsafe {
+        require_main_thread()?;
+        update_note_collection_behavior(window_id, |behavior| {
+            with_full_screen_auxiliary(behavior, enabled)
+        })
+        .map(|_| ())
+    }
+}
+
 struct SkyLight {
     _library: Library,
     main_connection_id: MainConnectionId,
@@ -530,9 +548,17 @@ unsafe fn set_note_collection_behavior(window_id: u32, attached: bool) -> AppRes
                 (behavior & !COLLECTION_BEHAVIOR_CAN_JOIN_ALL_SPACES)
                     | COLLECTION_BEHAVIOR_FULL_SCREEN_AUXILIARY
             } else {
-                behavior & !COLLECTION_BEHAVIOR_FULL_SCREEN_AUXILIARY
+                with_full_screen_auxiliary(behavior, false)
             }
         })
+    }
+}
+
+fn with_full_screen_auxiliary(behavior: usize, enabled: bool) -> usize {
+    if enabled {
+        behavior | COLLECTION_BEHAVIOR_FULL_SCREEN_AUXILIARY
+    } else {
+        behavior & !COLLECTION_BEHAVIOR_FULL_SCREEN_AUXILIARY
     }
 }
 
@@ -657,6 +683,18 @@ mod tests {
         assert!(placement(30, 30, 20).placement_verified());
         assert!(!placement(30, 31, 20).placement_verified());
         assert!(!placement(0, 0, 20).placement_verified());
+    }
+
+    #[test]
+    fn full_screen_auxiliary_behavior_is_toggled_without_touching_other_flags() {
+        let existing = COLLECTION_BEHAVIOR_CAN_JOIN_ALL_SPACES | (1 << 12);
+
+        let enabled = with_full_screen_auxiliary(existing, true);
+        assert_eq!(
+            enabled,
+            existing | COLLECTION_BEHAVIOR_FULL_SCREEN_AUXILIARY
+        );
+        assert_eq!(with_full_screen_auxiliary(enabled, false), existing);
     }
 
     #[test]

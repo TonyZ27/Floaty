@@ -32,13 +32,14 @@ async fn open_with_mode(
     let lbl = label(&sticky.id);
     if let Some(w) = app.get_webview_window(&lbl) {
         if keep_hidden {
-            let _ = w.set_always_on_top(false);
+            disable_pinning_runtime(app, &w).await?;
             w.set_position(tauri::LogicalPosition::new(-32000.0, -32000.0))
                 .map_err(|e| {
                     AppError::Other(format!("window set_position binding hidden: {}", e))
                 })?;
             return Ok(w);
         }
+        apply_pinning_runtime(app, &w, sticky.pinned == 1).await?;
         w.show().ok();
         w.set_focus().ok();
         return Ok(w);
@@ -62,6 +63,7 @@ async fn open_with_mode(
         .decorations(false)
         .transparent(true)
         .always_on_top(sticky.pinned == 1)
+        .visible_on_all_workspaces(sticky.pinned == 1)
         .visible(true);
 
     if is_collapsed {
@@ -98,6 +100,7 @@ async fn open_with_mode(
         .map_err(|e| AppError::Other(format!("window build failed: {}", e)))?;
 
     attach_geometry_listener(&window, sticky.id.clone())?;
+    apply_pinning_runtime(app, &window, sticky.pinned == 1).await?;
     Ok(window)
 }
 
@@ -121,7 +124,7 @@ pub async fn hide(app: &AppHandle, sticky_id: &str, db: &Db) -> AppResult<()> {
     .await?;
     if let Some(w) = app.get_webview_window(&label(sticky_id)) {
         // 先取消 always_on_top，否则即使在屏幕外也会在桌面切换时闪现
-        let _ = w.set_always_on_top(false);
+        disable_pinning_runtime(app, &w).await?;
         w.set_position(tauri::LogicalPosition::new(-32000.0, -32000.0))
             .map_err(|e| AppError::Other(format!("window set_position offscreen: {}", e)))?;
     }
@@ -149,7 +152,7 @@ pub async fn show(app: &AppHandle, sticky_id: &str, db: &Db) -> AppResult<Webvie
         };
         w.set_position(tauri::LogicalPosition::new(x as f64, y as f64))
             .map_err(|e| AppError::Other(format!("window set_position restore: {}", e)))?;
-        let _ = w.set_always_on_top(sticky.pinned == 1);
+        apply_pinning_runtime(app, &w, sticky.pinned == 1).await?;
         w.set_focus().ok();
         return Ok(w);
     }
@@ -182,9 +185,7 @@ pub async fn reveal_for_binding(
             .map_err(|error| {
                 AppError::Other(format!("window set_position binding restore: {error}"))
             })?;
-        window
-            .set_always_on_top(false)
-            .map_err(|error| AppError::Other(format!("disable global pinning: {error}")))?;
+        disable_pinning_runtime(app, &window).await?;
         return Ok(window);
     }
     open(app, &sticky).await
@@ -195,6 +196,11 @@ pub async fn toggle_pin(app: &AppHandle, sticky_id: &str, db: &Db) -> AppResult<
     ensure_pin_is_user_managed(db, sticky_id).await?;
     let s = db::stickies::get(db, sticky_id).await?;
     let next = if s.pinned == 1 { 0 } else { 1 };
+
+    if let Some(window) = app.get_webview_window(&label(sticky_id)) {
+        apply_pinning_runtime(app, &window, next == 1).await?;
+    }
+
     db::stickies::update(
         db,
         sticky_id,
@@ -204,11 +210,51 @@ pub async fn toggle_pin(app: &AppHandle, sticky_id: &str, db: &Db) -> AppResult<
         },
     )
     .await?;
-    if let Some(w) = app.get_webview_window(&label(sticky_id)) {
-        w.set_always_on_top(next == 1)
-            .map_err(|e| AppError::Other(format!("set_always_on_top: {}", e)))?;
-    }
     Ok(next == 1)
+}
+
+pub(crate) async fn apply_pinning_runtime(
+    app: &AppHandle,
+    window: &WebviewWindow,
+    pinned: bool,
+) -> AppResult<()> {
+    window
+        .set_visible_on_all_workspaces(pinned)
+        .map_err(|error| AppError::Other(format!("set visible on all workspaces: {error}")))?;
+    window
+        .set_always_on_top(pinned)
+        .map_err(|error| AppError::Other(format!("set global pinning: {error}")))?;
+
+    #[cfg(target_os = "macos")]
+    {
+        let window = window.clone();
+        run_on_main_thread(app, move || {
+            crate::platform::macos::window_spaces::set_note_full_screen_auxiliary(&window, pinned)
+        })
+        .await?;
+    }
+
+    Ok(())
+}
+
+async fn disable_pinning_runtime(app: &AppHandle, window: &WebviewWindow) -> AppResult<()> {
+    apply_pinning_runtime(app, window, false).await
+}
+
+#[cfg(target_os = "macos")]
+async fn run_on_main_thread<T, F>(app: &AppHandle, operation: F) -> AppResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> AppResult<T> + Send + 'static,
+{
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    app.run_on_main_thread(move || {
+        let _ = sender.send(operation());
+    })
+    .map_err(|error| AppError::Other(format!("main-thread dispatch failed: {error}")))?;
+    receiver
+        .await
+        .map_err(|_| AppError::Other("main-thread operation was cancelled".into()))?
 }
 
 async fn ensure_pin_is_user_managed(db: &Db, sticky_id: &str) -> AppResult<()> {
