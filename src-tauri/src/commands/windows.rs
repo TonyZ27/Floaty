@@ -131,8 +131,9 @@ pub async fn open_preferences(app: AppHandle) -> AppResult<()> {
     }
     WebviewWindowBuilder::new(&app, "preferences", WebviewUrl::App("index.html#/preferences".into()))
         .title("Floaty 偏好设置")
-        .inner_size(420.0, 300.0)
-        .resizable(false)
+        .inner_size(480.0, 540.0)
+        .min_inner_size(360.0, 280.0)
+        .resizable(true)
         .decorations(true)
         .transparent(false)
         .visible(true)
