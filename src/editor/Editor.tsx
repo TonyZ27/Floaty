@@ -621,6 +621,7 @@ export function Editor({ initialMarkdown, onChange }: EditorProps) {
         <InsertPicker
           anchor={picker.anchor}
           onPick={handlePick}
+          onCancel={() => setPicker(null)}
         />
       )}
       {ghost && !picker && <GhostPreview ghost={ghost} onAccept={() => acceptGhost(ghost)} />}

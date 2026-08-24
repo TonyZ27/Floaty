@@ -118,4 +118,81 @@ describe("InsertPicker component", () => {
       iso: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/),
     });
   });
+
+  describe("keyboard navigation", () => {
+    it("navigates down from initial position (starts at first item: P0) and selects with Enter", () => {
+      const onPick = vi.fn();
+      render(
+        <InsertPicker
+          anchor={{ left: 20, top: 40, bottom: 60 }}
+          onPick={onPick}
+        />,
+      );
+
+      // 初始按 ArrowDown -> 选中第 0 项 (P0)
+      fireEvent.keyDown(window, { key: "ArrowDown" });
+      fireEvent.keyDown(window, { key: "Enter" });
+
+      expect(onPick).toHaveBeenCalledWith({ kind: "priority", level: "P0" });
+    });
+
+    it("navigates up from initial position (goes to last item: 指定日期时间...) and activates with Enter", () => {
+      const onPick = vi.fn();
+      render(
+        <InsertPicker
+          anchor={{ left: 20, top: 40, bottom: 60 }}
+          onPick={onPick}
+        />,
+      );
+
+      // 初始按 ArrowUp -> 选中最后一项 (指定日期时间...)
+      fireEvent.keyDown(window, { key: "ArrowUp" });
+      fireEvent.keyDown(window, { key: "Enter" });
+
+      // 应进入指定日期时间子页面
+      expect(screen.getByTitle("返回")).toBeInTheDocument();
+      expect(screen.getByText("确定")).toBeInTheDocument();
+    });
+
+    it("cycles through items with sequential ArrowDown and ArrowUp presses", () => {
+      const onPick = vi.fn();
+      render(
+        <InsertPicker
+          anchor={{ left: 20, top: 40, bottom: 60 }}
+          onPick={onPick}
+        />,
+      );
+
+      // 初始 -> 0 (P0) -> 1 (P1) -> 2 (P2)
+      fireEvent.keyDown(window, { key: "ArrowDown" });
+      fireEvent.keyDown(window, { key: "ArrowDown" });
+      fireEvent.keyDown(window, { key: "ArrowDown" });
+      fireEvent.keyDown(window, { key: "Enter" });
+
+      expect(onPick).toHaveBeenCalledWith({ kind: "priority", level: "P2" });
+    });
+
+    it("handles Escape to trigger onCancel in main view and return in subview", () => {
+      const onPick = vi.fn();
+      const onCancel = vi.fn();
+      render(
+        <InsertPicker
+          anchor={{ left: 20, top: 40, bottom: 60 }}
+          onPick={onPick}
+          onCancel={onCancel}
+        />,
+      );
+
+      // 在主视图按 Escape 触发 onCancel
+      fireEvent.keyDown(window, { key: "Escape" });
+      expect(onCancel).toHaveBeenCalledTimes(1);
+
+      // 进入子页面后按 Escape 返回主视图
+      fireEvent.click(screen.getByText("指定日期时间..."));
+      expect(screen.getByTitle("返回")).toBeInTheDocument();
+
+      fireEvent.keyDown(window, { key: "Escape" });
+      expect(screen.getByText("优先级")).toBeInTheDocument();
+    });
+  });
 });

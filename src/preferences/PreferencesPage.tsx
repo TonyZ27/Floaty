@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { check, Update } from "@tauri-apps/plugin-updater";
@@ -6,7 +6,10 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import { save } from "@tauri-apps/plugin-dialog";
 import { getVersion } from "@tauri-apps/api/app";
 import { ipc } from "../ipc/client";
-import { kbd, IS_MAC } from "../platform";
+import { IS_MAC } from "../platform";
+import { ShortcutRecorder } from "../shortcuts/ShortcutRecorder";
+import { KeyCombo, DEFAULT_SHORTCUTS } from "../shortcuts/types";
+import { serializeKeyCombo, parseKeyCombo } from "../shortcuts/utils";
 
 type UpdateStatus =
   | { kind: "idle" }
@@ -39,6 +42,17 @@ export function PreferencesPage() {
     | { kind: "error"; message: string }
   >({ kind: "idle" });
 
+  const [shortcuts, setShortcuts] = useState<Record<string, KeyCombo | null>>({});
+  const [toast, setToast] = useState<string | null>(null);
+  const toastTimerRef = useRef<number | null>(null);
+  const [showResetConfirm, setShowResetConfirm] = useState<boolean>(false);
+
+  const showToast = (msg: string) => {
+    setToast(msg);
+    if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = window.setTimeout(() => setToast(null), 2200);
+  };
+
   useEffect(() => {
     (async () => {
       try {
@@ -58,11 +72,52 @@ export function PreferencesPage() {
         setBubbleEnabled(bm !== "false");
         setFloatingEnabled(fm !== "false");
         setCurrentVersion(v);
+
+        // 加载自定义快捷键
+        const loadedShortcuts: Record<string, KeyCombo | null> = {};
+        for (const def of DEFAULT_SHORTCUTS) {
+          const val = await invoke<string | null>("get_setting", { key: def.id });
+          loadedShortcuts[def.id] = val !== null ? parseKeyCombo(val) : def.defaultCombo;
+        }
+        setShortcuts(loadedShortcuts);
       } catch (err) {
         console.error("[floaty] preferences load failed:", err);
       }
     })();
   }, []);
+
+  const handleShortcutChange = async (id: string, newCombo: KeyCombo | null) => {
+    setShortcuts((prev) => ({ ...prev, [id]: newCombo }));
+    try {
+      const serialized = serializeKeyCombo(newCombo);
+      await invoke("set_setting", { key: id, value: serialized });
+      if (newCombo) {
+        showToast("快捷键已更新");
+      } else {
+        showToast("已删除快捷键");
+      }
+    } catch (err) {
+      console.error("[floaty] save shortcut failed:", err);
+      showToast("保存快捷键失败");
+    }
+  };
+
+  const handleConfirmReset = async () => {
+    try {
+      const resetMap: Record<string, KeyCombo | null> = {};
+      for (const def of DEFAULT_SHORTCUTS) {
+        resetMap[def.id] = def.defaultCombo;
+        const serialized = serializeKeyCombo(def.defaultCombo);
+        await invoke("set_setting", { key: def.id, value: serialized });
+      }
+      setShortcuts(resetMap);
+      setShowResetConfirm(false);
+      showToast("快捷键已恢复默认设置");
+    } catch (err) {
+      console.error("[floaty] reset shortcuts failed:", err);
+      showToast("重置快捷键失败");
+    }
+  };
 
   const checkForUpdate = async () => {
     setUpdateStatus({ kind: "checking" });
@@ -213,7 +268,42 @@ export function PreferencesPage() {
   };
 
   return (
-    <div className="h-screen flex flex-col bg-white/95 dark:bg-zinc-900/95 text-sm" style={{ color: "#1d1d1f" }}>
+    <div className="h-screen flex flex-col bg-white/95 dark:bg-zinc-900/95 text-sm relative select-none" style={{ color: "#1d1d1f" }}>
+      {/* 操作反馈 Toast */}
+      {toast && (
+        <div className="fixed top-3 left-1/2 -translate-x-1/2 z-50 pointer-events-none animate-in fade-in slide-in-from-top-2 duration-200">
+          <div className="px-3.5 py-1.5 rounded-full bg-black/85 dark:bg-white/90 text-white dark:text-black shadow-lg text-xs font-medium backdrop-blur-md flex items-center gap-1.5">
+            <span>{toast}</span>
+          </div>
+        </div>
+      )}
+
+      {/* 恢复默认快捷键确认弹窗 */}
+      {showResetConfirm && (
+        <div className="fixed inset-0 z-50 bg-black/30 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in duration-150">
+          <div className="bg-white dark:bg-zinc-800 rounded-2xl p-5 max-w-xs w-full shadow-2xl border border-black/10 dark:border-white/10 flex flex-col gap-3">
+            <div className="font-semibold text-sm text-black dark:text-white">重置快捷键</div>
+            <div className="text-xs text-black/60 dark:text-white/60 leading-relaxed">
+              确定要将所有快捷键恢复为默认设置吗？
+            </div>
+            <div className="flex gap-2 justify-end pt-2">
+              <button
+                className="px-3 h-7 rounded-lg border border-black/10 dark:border-white/10 hover:bg-black/5 dark:hover:bg-white/5 text-xs font-medium transition active:scale-95 text-black/80 dark:text-white/80"
+                onClick={() => setShowResetConfirm(false)}
+              >
+                取消
+              </button>
+              <button
+                className="px-3 h-7 rounded-lg bg-black hover:bg-black/85 text-white text-xs font-medium shadow-sm transition active:scale-95"
+                onClick={handleConfirmReset}
+              >
+                恢复默认
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="px-4 py-3 border-b border-black/5 bg-black/[0.01]">
         <div className="font-semibold text-[15px] tracking-tight">Floaty 设置</div>
         <div className="text-[11px] opacity-50 mt-0.5">极简的 macOS 桌面便签式 Todo</div>
@@ -245,17 +335,15 @@ export function PreferencesPage() {
                   checked={autostart}
                   onChange={(e) => toggleAutostart(e.target.checked)}
                 />
-                <span className="ios-switch-track">
-                  <span className="ios-switch-thumb" />
-                </span>
+                <span className="ios-slider" />
               </label>
             </div>
             
             <div className="flex items-center justify-between py-2">
-              <div className="flex flex-col gap-0.5 pr-2">
-                <span className="text-xs font-semibold text-black/85">启用全局快捷键</span>
+              <div className="flex flex-col gap-0.5">
+                <span className="text-xs font-semibold text-black/85">全局新建便签快捷键</span>
                 <span className="text-[10px] opacity-50 font-medium">
-                  在任何 App 下按 <Kbd>{kbd(["mod", "shift", "N"])}</Kbd> 快速新建便签
+                  {IS_MAC ? "⌘⇧N 全局呼出新建" : "Ctrl+Shift+N 全局呼出新建"}
                 </span>
               </div>
               <label className="ios-switch">
@@ -264,41 +352,31 @@ export function PreferencesPage() {
                   checked={globalEnabled}
                   onChange={(e) => toggleGlobal(e.target.checked)}
                 />
-                <span className="ios-switch-track">
-                  <span className="ios-switch-thumb" />
-                </span>
+                <span className="ios-slider" />
               </label>
             </div>
-          </div>
-        </section>
 
-        {/* 编辑器 */}
-        <section className="space-y-2">
-          <div className="text-[10px] font-semibold uppercase tracking-wider opacity-40 px-1">编辑器配置</div>
-          <div className="rounded-xl border border-black/5 bg-white shadow-sm p-3 divide-y divide-black/5">
-            <div className="flex items-center justify-between py-2.5">
-              <div className="flex flex-col gap-0.5 pr-4">
-                <span className="text-xs font-semibold text-black/85">选中文字时显示格式工具栏</span>
-                <span className="text-[10px] opacity-50 font-medium">提供粗斜体、删除线、行内码等格式快捷工具</span>
+            <div className="flex items-center justify-between py-2">
+              <div className="flex flex-col gap-0.5">
+                <span className="text-xs font-semibold text-black/85">文本选区快捷气泡菜单</span>
+                <span className="text-[10px] opacity-50 font-medium">选中文字时上方显示格式栏</span>
               </div>
-              <label className="ios-switch flex-shrink-0">
+              <label className="ios-switch">
                 <input
                   type="checkbox"
                   checked={bubbleEnabled}
                   onChange={(e) => toggleBubble(e.target.checked)}
                 />
-                <span className="ios-switch-track">
-                  <span className="ios-switch-thumb" />
-                </span>
+                <span className="ios-slider" />
               </label>
             </div>
 
-            <div className="flex items-center justify-between py-2.5">
-              <div className="flex flex-col gap-0.5 pr-4">
-                <span className="text-xs font-semibold text-black/85">空行时显示悬浮菜单</span>
-                <span className="text-[10px] opacity-50 font-medium">在空行左侧显示待办、有序列表及引用的快捷插入按钮</span>
+            <div className="flex items-center justify-between py-2">
+              <div className="flex flex-col gap-0.5">
+                <span className="text-xs font-semibold text-black/85">便签底部悬浮快捷栏</span>
+                <span className="text-[10px] opacity-50 font-medium">在便签底部显示常用格式与时间按钮</span>
               </div>
-              <label className="ios-switch flex-shrink-0">
+              <label className="ios-switch">
                 <input
                   type="checkbox"
                   checked={floatingEnabled}
@@ -375,19 +453,35 @@ export function PreferencesPage() {
 
         {/* 快捷键 */}
         <section className="space-y-2">
-          <div className="text-[10px] font-semibold uppercase tracking-wider opacity-40 px-1">快捷键参考</div>
-          <div className="rounded-xl border border-black/5 bg-white shadow-sm p-3 divide-y divide-black/5 text-[11px] space-y-0.5">
-            <div className="py-2.5"><Row k={kbd(["mod", "shift", "N"])} d="全局：新建便签" /></div>
-            <div className="py-2.5"><Row k={kbd(["mod", "N"])} d="便签聚焦时：新建便签" /></div>
-            <div className="py-2.5"><Row k={kbd(["mod", "W"])} d="隐藏当前便签 (不删除)" /></div>
-            <div className="py-2.5"><Row k={kbd(["mod", "shift", "P"])} d="切换置顶状态" /></div>
-            <div className="py-2.5"><Row k={kbd(["mod", ","])} d="打开/关闭外观设置" /></div>
-            <div className="py-2.5"><Row k={kbd(["mod", "backspace"])} d="删除当前便签" /></div>
-            <div className="py-2.5"><Row k="@" d="编辑区：打开时间选择器" /></div>
-            <div className="py-2.5"><Row k={kbd(["tab"])} d="编辑区：接受时间预览" /></div>
+          <div className="text-[10px] font-semibold uppercase tracking-wider opacity-40 px-1">快捷键</div>
+          <div className="rounded-xl border border-black/5 bg-white shadow-sm p-3 divide-y divide-black/5 text-xs">
+            {DEFAULT_SHORTCUTS.map((def) => {
+              const current = shortcuts[def.id] !== undefined ? shortcuts[def.id] : def.defaultCombo;
+              return (
+                <div key={def.id} className="py-2.5 flex items-center justify-between gap-3">
+                  <div className="flex flex-col gap-0.5">
+                    <span className="font-semibold text-black/85 text-xs">{def.label}</span>
+                    <span className="text-[10px] opacity-45">{def.description}</span>
+                  </div>
+                  <ShortcutRecorder
+                    value={current}
+                    onChange={(combo) => handleShortcutChange(def.id, combo)}
+                    onInvalidCombo={(msg) => showToast(msg)}
+                  />
+                </div>
+              );
+            })}
           </div>
-          <div className="text-[10px] opacity-45 px-1">
-            快捷键自定义功能将在后续版本中提供。
+
+          {/* 恢复默认快捷键 */}
+          <div className="rounded-xl border border-black/5 bg-white shadow-sm px-3 py-2.5 flex items-center justify-between">
+            <span className="text-xs font-medium text-black/75">恢复默认快捷键</span>
+            <button
+              className="text-xs px-2.5 h-7 rounded-lg border border-black/10 hover:bg-black/5 text-black/75 hover:text-black transition active:scale-95"
+              onClick={() => setShowResetConfirm(true)}
+            >
+              恢复默认
+            </button>
           </div>
         </section>
 
@@ -426,22 +520,6 @@ function Stat({ label, value }: { label: string; value: number | string }) {
   );
 }
 
-function Kbd({ children }: { children: React.ReactNode }) {
-  return (
-    <kbd className="font-mono text-[10px] px-1.5 py-[1px] rounded border border-black/15 bg-black/5 mx-0.5">
-      {children}
-    </kbd>
-  );
-}
-
-function Row({ k, d }: { k: string; d: string }) {
-  return (
-    <div className="flex items-center justify-between">
-      <span>{d}</span>
-      <Kbd>{k}</Kbd>
-    </div>
-  );
-}
 
 function UpdatePanel({
   status,

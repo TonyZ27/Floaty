@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { Editor } from "../editor/Editor";
 import { useStickyData } from "./useStickyData";
 import { SettingsPopover } from "./SettingsPopover";
@@ -7,6 +8,8 @@ import { ipc } from "../ipc/client";
 import { autoFg } from "../theme/contrast";
 import type { StickyPatch, WindowBindingView } from "../ipc/types";
 import { FileText, Pin, Settings, X, ChevronDown, ChevronUp } from "lucide-react";
+import { KeyCombo, DEFAULT_SHORTCUTS } from "../shortcuts/types";
+import { parseKeyCombo, matchesShortcut } from "../shortcuts/utils";
 
 interface StickyPageProps {
   stickyId: string;
@@ -19,6 +22,28 @@ export function StickyPage({ stickyId }: StickyPageProps) {
   const [isEditing, setIsEditing] = useState(false);
   const [tempTitle, setTempTitle] = useState("");
   const [bindingStatus, setBindingStatus] = useState<boolean | null>(null);
+  const [customShortcuts, setCustomShortcuts] = useState<Record<string, KeyCombo | null>>({});
+
+  useEffect(() => {
+    const loadShortcuts = async () => {
+      const map: Record<string, KeyCombo | null> = {};
+      for (const def of DEFAULT_SHORTCUTS) {
+        try {
+          const val = await invoke<string | null>("get_setting", { key: def.id });
+          map[def.id] = val !== null ? parseKeyCombo(val) : def.defaultCombo;
+        } catch {
+          map[def.id] = def.defaultCombo;
+        }
+      }
+      setCustomShortcuts(map);
+    };
+    void loadShortcuts();
+
+    window.addEventListener("focus", loadShortcuts);
+    return () => {
+      window.removeEventListener("focus", loadShortcuts);
+    };
+  }, []);
 
   const refreshSticky = useCallback(async () => {
     try {
@@ -39,25 +64,23 @@ export function StickyPage({ stickyId }: StickyPageProps) {
     [refreshSticky],
   );
 
-  // 便签内快捷键：⌘W / ⌘⇧P / ⌘, / ⌘⌫
-  // 必须在任何 early-return 之前挂，否则 Rules of Hooks 炸。
+  // 便签内快捷键：支持自定义绑定
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      const mod = e.metaKey || e.ctrlKey;
-      if (!mod) return;
-      const key = e.key.toLowerCase();
-      if (key === "w" && !e.shiftKey) {
+      const getCombo = (id: string, defCombo: KeyCombo) =>
+        customShortcuts[id] !== undefined ? customShortcuts[id] : defCombo;
+
+      if (matchesShortcut(e, getCombo("shortcut_sticky_hide", { meta: true, key: "W" }))) {
         e.preventDefault();
-        ipc.hideSticky(stickyId).catch((err) => console.error("[floaty] ⌘W:", err));
+        ipc.hideSticky(stickyId).catch((err) => console.error("[floaty] hide:", err));
         return;
       }
-      // ⌘N：在当前便签聚焦时新建一张
-      if (key === "n" && !e.shiftKey) {
+      if (matchesShortcut(e, getCombo("shortcut_sticky_new", { meta: true, key: "N" }))) {
         e.preventDefault();
-        ipc.newStickyWindow().catch((err) => console.error("[floaty] ⌘N:", err));
+        ipc.newStickyWindow().catch((err) => console.error("[floaty] new sticky:", err));
         return;
       }
-      if (key === "p" && e.shiftKey) {
+      if (matchesShortcut(e, getCombo("shortcut_sticky_pin", { meta: true, shift: true, key: "P" }))) {
         e.preventDefault();
         if (bindingStatus !== false) return;
         (async () => {
@@ -65,23 +88,23 @@ export function StickyPage({ stickyId }: StickyPageProps) {
             await ipc.togglePin(stickyId);
             await refreshSticky();
           } catch (err) {
-            console.error("[floaty] ⌘⇧P:", err);
+            console.error("[floaty] pin:", err);
           }
         })();
         return;
       }
-      if (key === ",") {
+      if (matchesShortcut(e, getCombo("shortcut_sticky_settings", { meta: true, key: "," }))) {
         e.preventDefault();
         setSettingsOpen((v) => !v);
         return;
       }
-      if (key === "backspace") {
+      if (matchesShortcut(e, getCombo("shortcut_sticky_delete", { meta: true, key: "Backspace" }))) {
         e.preventDefault();
         setSettingsOpen(false);
         setConfirmDelete(true);
         return;
       }
-      if (e.key === "\\") {
+      if (e.key === "\\" && (e.metaKey || e.ctrlKey)) {
         e.preventDefault();
         (async () => {
           try {
@@ -98,7 +121,7 @@ export function StickyPage({ stickyId }: StickyPageProps) {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [bindingStatus, refreshSticky, stickyId, setSticky]);
+  }, [customShortcuts, bindingStatus, refreshSticky, stickyId, setSticky]);
 
   if (!loaded || !sticky) {
     return <div className="h-screen bg-yellow-100 p-3 text-xs opacity-60">Loading...</div>;
