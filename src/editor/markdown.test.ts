@@ -70,6 +70,36 @@ describe("markdown round-trip", () => {
     const dueNodes = para?.content?.filter((n) => n.type === "dueTime") ?? [];
     expect(dueNodes).toHaveLength(2);
   });
+
+  it("round-trips a todo with @priority token", () => {
+    const md = "- [ ] 核心故障修复 @priority:P0";
+    const doc = markdownToDoc(md);
+    const para = doc.content?.[0].content?.[0].content?.[0];
+    expect(para?.content).toHaveLength(2);
+    expect(para?.content?.[0].type).toBe("text");
+    expect(para?.content?.[1].type).toBe("priority");
+    expect(para?.content?.[1].attrs?.level).toBe("P0");
+    expect(docToMarkdown(doc)).toBe(md);
+  });
+
+  it("round-trips all priority levels P0, P1, P2, P3", () => {
+    for (const level of ["P0", "P1", "P2", "P3"]) {
+      const md = `任务 @priority:${level}`;
+      const doc = markdownToDoc(md);
+      expect(doc.content?.[0].content?.[1].type).toBe("priority");
+      expect(doc.content?.[0].content?.[1].attrs?.level).toBe(level);
+      expect(docToMarkdown(doc)).toBe(md);
+    }
+  });
+
+  it("round-trips priority and dueTime in the same line", () => {
+    const md = "- [ ] 上线发布 @priority:P0 @due:2026-04-20T22:00:00Z";
+    const doc = markdownToDoc(md);
+    const para = doc.content?.[0].content?.[0].content?.[0];
+    expect(para?.content?.[1].type).toBe("priority");
+    expect(para?.content?.[3].type).toBe("dueTime");
+    expect(docToMarkdown(doc)).toBe(md);
+  });
 });
 
 describe("markdown extended blocks", () => {

@@ -13,7 +13,8 @@ import Link from "@tiptap/extension-link";
 import { useEffect, useRef, useState } from "react";
 import { docToMarkdown, markdownToDoc } from "./markdown";
 import { DueTime, refreshAllPills } from "./DueTime";
-import { DueTimePicker, type AnchorRect } from "./DueTimePicker";
+import { Priority, refreshAllPriorities, PriorityLevel } from "./Priority";
+import { InsertPicker, type AnchorRect, type InsertChoice } from "./InsertPicker";
 import { parseTimeHint, type TimeHint } from "./timeHints";
 import { tierLabel, tierOf } from "../theme/urgency";
 import {
@@ -138,7 +139,8 @@ interface EditorProps {
 type PickerState =
   | null
   | { anchor: AnchorRect; mode: "insert" }
-  | { anchor: AnchorRect; mode: "edit"; pos: number };
+  | { anchor: AnchorRect; mode: "edit-due"; pos: number }
+  | { anchor: AnchorRect; mode: "edit-priority"; pos: number };
 
 interface GhostState {
   from: number;
@@ -195,6 +197,18 @@ export function Editor({ initialMarkdown, onChange }: EditorProps) {
           }
         },
       }),
+      Priority.configure({
+        onEdit: (pos: number, level: PriorityLevel) => {
+          const el = containerRef.current?.querySelector<HTMLElement>(
+            `span[data-priority="${level}"]`,
+          );
+          const rect = el?.getBoundingClientRect();
+          const anchor: AnchorRect = rect
+            ? { left: rect.left, top: rect.top, bottom: rect.bottom }
+            : { left: 20, top: 20, bottom: 40 };
+          setPicker({ anchor, mode: "edit-priority", pos });
+        },
+      }),
       DueTime.configure({
         onEdit: (pos: number, iso: string) => {
           const el = containerRef.current?.querySelector<HTMLElement>(
@@ -204,7 +218,7 @@ export function Editor({ initialMarkdown, onChange }: EditorProps) {
           const anchor: AnchorRect = rect
             ? { left: rect.left, top: rect.top, bottom: rect.bottom }
             : { left: 20, top: 20, bottom: 40 };
-          setPicker({ anchor, mode: "edit", pos });
+          setPicker({ anchor, mode: "edit-due", pos });
         },
       }),
     ],
@@ -312,10 +326,13 @@ export function Editor({ initialMarkdown, onChange }: EditorProps) {
     },
   });
 
-  // 每 60s 刷新所有 pill
+  // 每 60s 刷新所有 pill 与 priority
   useEffect(() => {
     const tick = () => {
-      if (containerRef.current) refreshAllPills(containerRef.current);
+      if (containerRef.current) {
+        refreshAllPills(containerRef.current);
+        refreshAllPriorities(containerRef.current);
+      }
     };
     tick();
     const id = window.setInterval(tick, 60000);
@@ -325,7 +342,10 @@ export function Editor({ initialMarkdown, onChange }: EditorProps) {
   useEffect(() => {
     if (!editor) return;
     const handler = () => {
-      if (containerRef.current) refreshAllPills(containerRef.current);
+      if (containerRef.current) {
+        refreshAllPills(containerRef.current);
+        refreshAllPriorities(containerRef.current);
+      }
     };
     editor.on("update", handler);
     return () => {
@@ -396,32 +416,63 @@ export function Editor({ initialMarkdown, onChange }: EditorProps) {
     setGhost(null);
   };
 
-  const handlePick = (iso: string) => {
+  const handlePick = (choice: InsertChoice) => {
     if (!editor) return;
     const current = pickerRef.current;
     if (!current) return;
 
-    if (current.mode === "edit") {
-      // 替换原 pill 的 datetime
+    if (current.mode === "edit-due") {
+      if (choice.kind === "dueTime") {
+        editor
+          .chain()
+          .focus()
+          .setNodeSelection(current.pos)
+          .updateAttributes("dueTime", { datetime: choice.iso })
+          .run();
+      }
+      setPicker(null);
+      return;
+    }
+
+    if (current.mode === "edit-priority") {
+      if (choice.kind === "priority") {
+        editor
+          .chain()
+          .focus()
+          .setNodeSelection(current.pos)
+          .updateAttributes("priority", { level: choice.level })
+          .run();
+      }
+      setPicker(null);
+      return;
+    }
+
+    // insert 模式：删除光标前可能残留的 '@' 并插入对应的 Chip
+    const { from } = editor.state.selection;
+    if (from > 0) {
+      const char = editor.state.doc.textBetween(from - 1, from);
+      if (char === "@") {
+        editor.chain().focus().deleteRange({ from: from - 1, to: from }).run();
+      }
+    }
+
+    if (choice.kind === "priority") {
       editor
         .chain()
         .focus()
-        .setNodeSelection(current.pos)
-        .updateAttributes("dueTime", { datetime: iso })
+        .insertContent([
+          { type: "priority", attrs: { level: choice.level } },
+          { type: "text", text: " " },
+        ])
         .run();
     } else {
-      // 插入新 pill；先清掉光标前可能残留的 '@'
-      const { from } = editor.state.selection;
-      if (from > 0) {
-        const char = editor.state.doc.textBetween(from - 1, from);
-        if (char === "@") {
-          editor.chain().focus().deleteRange({ from: from - 1, to: from }).run();
-        }
-      }
       editor
         .chain()
         .focus()
-        .insertContent([{ type: "dueTime", attrs: { datetime: iso } }, { type: "text", text: " " }])
+        .insertContent([
+          { type: "dueTime", attrs: { datetime: choice.iso } },
+          { type: "text", text: " " },
+        ])
         .run();
     }
     setPicker(null);
@@ -567,10 +618,9 @@ export function Editor({ initialMarkdown, onChange }: EditorProps) {
         </BubbleMenu>
       )}
       {picker && (
-        <DueTimePicker
+        <InsertPicker
           anchor={picker.anchor}
           onPick={handlePick}
-          onCancel={() => setPicker(null)}
         />
       )}
       {ghost && !picker && <GhostPreview ghost={ghost} onAccept={() => acceptGhost(ghost)} />}

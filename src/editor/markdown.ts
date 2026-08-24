@@ -84,6 +84,10 @@ function serializeListItemInner(li: ProseNode): string {
 function serializeInline(nodes: ProseNode[]): string {
   return nodes
     .map((n) => {
+      if (n.type === "priority") {
+        const level = n.attrs?.level ?? "P1";
+        return `@priority:${level}`;
+      }
       if (n.type === "dueTime") {
         const iso = n.attrs?.datetime ?? "";
         return iso ? `@due:${iso}` : "";
@@ -119,6 +123,8 @@ function serializeInline(nodes: ProseNode[]): string {
 
 const DUE_RE = /@due:(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))/;
 const DUE_RE_GLOBAL = /@due:(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))/g;
+const PRIORITY_RE = /@priority:(P[0-3])/;
+const PRIORITY_RE_GLOBAL = /@priority:(P[0-3])/g;
 
 export interface DueEntry {
   itemIndex: number;
@@ -139,6 +145,7 @@ export function extractDues(md: string): DueEntry[] {
       if (matches.length > 0) {
         const preview = line
           .replace(DUE_RE_GLOBAL, "")
+          .replace(PRIORITY_RE_GLOBAL, "")
           .replace(/^- \[[ x]\] /, "")
           .replace(/^#+\s+/, "")
           .replace(/\*\*(.+?)\*\*/g, "$1")
@@ -402,9 +409,25 @@ function parseInline(text: string): ProseNode[] {
         continue;
       }
     }
+    // @priority:P0..P3 at cursor position
+    if (text.startsWith("@priority:", i)) {
+      const rest = text.slice(i);
+      const priM = rest.match(PRIORITY_RE);
+      if (priM && priM.index === 0) {
+        tokens.push({ type: "priority", attrs: { level: priM[1] } });
+        i += priM[0].length;
+        continue;
+      }
+    }
     // Accumulate normal chars until next special
     let j = i;
-    while (j < text.length && !"*[`~".includes(text[j]) && !text.startsWith("@due:", j)) j++;
+    while (
+      j < text.length &&
+      !"*[`~".includes(text[j]) &&
+      !text.startsWith("@due:", j) &&
+      !text.startsWith("@priority:", j)
+    )
+      j++;
     if (j === i) j = i + 1;
     pushText(text.slice(i, j));
     i = j;
