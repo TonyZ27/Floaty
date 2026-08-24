@@ -1,9 +1,90 @@
 import { useState } from "react";
 import { X } from "lucide-react";
 
+export interface AnchorRect {
+  left: number;
+  top: number;
+  bottom: number;
+}
+
+export interface PickerPosition {
+  x: number;
+  top?: number;
+  bottom?: number;
+  maxHeight: number;
+}
+
+export function computePickerPosition(
+  anchor: AnchorRect,
+  vw: number = typeof window !== "undefined" ? window.innerWidth : 800,
+  vh: number = typeof window !== "undefined" ? window.innerHeight : 600,
+): PickerPosition {
+  const PICKER_WIDTH = 220;
+  const MARGIN = 8;
+  const GAP = 4;
+  const FULL_HEIGHT = 400;
+
+  const x = Math.max(MARGIN, Math.min(anchor.left, vw - PICKER_WIDTH - MARGIN));
+
+  const spaceBelow = vh - anchor.bottom - GAP - MARGIN;
+  const spaceAbove = anchor.top - GAP - MARGIN;
+
+  // 1. 如果下方空间足够完整显示面板，直接在下方展开
+  if (spaceBelow >= FULL_HEIGHT) {
+    const top = anchor.bottom + GAP;
+    return {
+      x,
+      top,
+      maxHeight: vh - top - MARGIN,
+    };
+  }
+
+  // 2. 如果上方空间足够完整显示面板，在上方展开
+  if (spaceAbove >= FULL_HEIGHT) {
+    return {
+      x,
+      bottom: vh - anchor.top + GAP,
+      maxHeight: spaceAbove,
+    };
+  }
+
+  // 3. 超小视口保护 (高度 <= 220px)
+  if (vh <= 220) {
+    return {
+      x,
+      top: MARGIN,
+      maxHeight: Math.max(60, vh - MARGIN * 2),
+    };
+  }
+
+  // 4. 哪边空间大选哪边，并根据可用空间限制 maxHeight 与位置
+  if (spaceBelow >= spaceAbove) {
+    const top = anchor.bottom + GAP;
+    const maxHeight = Math.max(100, spaceBelow);
+    const clampedTop = Math.min(top, vh - maxHeight - MARGIN);
+    const finalTop = Math.max(MARGIN, clampedTop);
+    return {
+      x,
+      top: finalTop,
+      maxHeight: Math.min(maxHeight, vh - finalTop - MARGIN),
+    };
+  } else {
+    const maxHeight = Math.max(100, spaceAbove);
+    const bottom = vh - anchor.top + GAP;
+    const clampedBottom = Math.min(bottom, vh - maxHeight - MARGIN);
+    const finalBottom = Math.max(MARGIN, clampedBottom);
+    return {
+      x,
+      bottom: finalBottom,
+      maxHeight: Math.min(maxHeight, vh - finalBottom - MARGIN),
+    };
+  }
+}
+
 interface DueTimePickerProps {
-  x: number; // viewport-relative
-  y: number;
+  anchor?: AnchorRect;
+  x?: number; // legacy fallback
+  y?: number;
   onPick: (iso: string) => void;
   onCancel: () => void;
 }
@@ -54,7 +135,7 @@ const COUNTDOWN_CHIPS = [
   { label: "2小时", minutes: 120 },
 ];
 
-export function DueTimePicker({ x, y, onPick, onCancel }: DueTimePickerProps) {
+export function DueTimePicker({ anchor, x, y, onPick, onCancel }: DueTimePickerProps) {
   const [custom, setCustom] = useState<string>(() => {
     const d = new Date();
     d.setMinutes(0, 0, 0);
@@ -64,6 +145,10 @@ export function DueTimePicker({ x, y, onPick, onCancel }: DueTimePickerProps) {
   const [countdownVal, setCountdownVal] = useState<string>("30");
   const [countdownUnit, setCountdownUnit] = useState<"min" | "hr">("min");
   const options = makeQuickOptions();
+
+  const pos = anchor
+    ? computePickerPosition(anchor)
+    : computePickerPosition({ left: x ?? 20, top: (y ?? 24) - 4, bottom: y ?? 24 });
 
   const pickCountdown = (minutes: number) => {
     const d = new Date(Date.now() + minutes * 60_000);
@@ -79,13 +164,13 @@ export function DueTimePicker({ x, y, onPick, onCancel }: DueTimePickerProps) {
 
   return (
     <div
-      className="fixed z-50 glass-panel rounded-xl flex flex-col shadow-2xl transition-all duration-200"
+      className="fixed z-50 glass-panel rounded-xl flex flex-col shadow-2xl overflow-hidden transition-all duration-200"
       style={{
-        left: x,
-        top: y,
+        left: pos.x,
+        ...(pos.top !== undefined ? { top: pos.top } : { bottom: pos.bottom }),
+        maxHeight: `${pos.maxHeight}px`,
         width: "220px",
         maxWidth: "calc(100vw - 16px)",
-        maxHeight: "calc(100vh - 16px)",
         color: "#1d1d1f",
       }}
       onMouseDown={(e) => e.stopPropagation()}
@@ -101,7 +186,7 @@ export function DueTimePicker({ x, y, onPick, onCancel }: DueTimePickerProps) {
           <X size={11} strokeWidth={2.5} />
         </button>
       </div>
-      <div className="py-1.5 text-xs overflow-y-auto">
+      <div className="py-1.5 text-xs overflow-y-auto flex-1 min-h-0">
         {options.map((opt) => (
           <button
             key={opt.label}

@@ -26,6 +26,9 @@ importers:
       '@tauri-apps/plugin-updater':
         specifier: ^2.10.1
         version: 2.10.1
+      '@tiptap/core':
+        specifier: ^3.22.3
+        version: 3.28.0(@tiptap/pm@3.28.0)
       '@tiptap/extension-bubble-menu':
         specifier: ^3.22.4
         version: 3.28.0(@tiptap/core@3.28.0(@tiptap/pm@3.28.0))(@tiptap/pm@3.28.0)

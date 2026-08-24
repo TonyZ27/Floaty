@@ -13,7 +13,7 @@ import Link from "@tiptap/extension-link";
 import { useEffect, useRef, useState } from "react";
 import { docToMarkdown, markdownToDoc } from "./markdown";
 import { DueTime, refreshAllPills } from "./DueTime";
-import { DueTimePicker } from "./DueTimePicker";
+import { DueTimePicker, type AnchorRect } from "./DueTimePicker";
 import { parseTimeHint, type TimeHint } from "./timeHints";
 import { tierLabel, tierOf } from "../theme/urgency";
 import {
@@ -69,6 +69,67 @@ const MarkdownLinkShortcut = Extension.create({
   },
 });
 
+interface AtMentionOptions {
+  onTrigger: (anchor: AnchorRect) => void;
+  onDismiss: () => void;
+}
+
+const AtMentionTrigger = Extension.create<AtMentionOptions>({
+  name: "atMentionTrigger",
+  addOptions() {
+    return {
+      onTrigger: () => {},
+      onDismiss: () => {},
+    };
+  },
+  addProseMirrorPlugins() {
+    return [
+      new Plugin({
+        view: () => {
+          return {
+            update: (view) => {
+              const { state } = view;
+              const { selection } = state;
+              const { empty, from } = selection;
+
+              if (!empty || from === 0) {
+                this.options.onDismiss();
+                return;
+              }
+
+              const $from = selection.$from;
+              if (
+                $from.parent.type.name === "codeBlock" ||
+                (view.state.schema.marks.code &&
+                  view.state.doc.rangeHasMark(from - 1, from, view.state.schema.marks.code))
+              ) {
+                this.options.onDismiss();
+                return;
+              }
+
+              const charBefore = state.doc.textBetween(from - 1, from, "\n", " ");
+              if (charBefore === "@") {
+                try {
+                  const coords = view.coordsAtPos(from);
+                  this.options.onTrigger({
+                    left: coords.left,
+                    top: coords.top,
+                    bottom: coords.bottom,
+                  });
+                } catch (e) {
+                  console.warn("[floaty] failed to get coords at pos:", e);
+                }
+              } else {
+                this.options.onDismiss();
+              }
+            },
+          };
+        },
+      }),
+    ];
+  },
+});
+
 interface EditorProps {
   initialMarkdown: string;
   onChange: (markdown: string) => void;
@@ -76,8 +137,8 @@ interface EditorProps {
 
 type PickerState =
   | null
-  | { x: number; y: number; mode: "insert" }
-  | { x: number; y: number; mode: "edit"; pos: number };
+  | { anchor: AnchorRect; mode: "insert" }
+  | { anchor: AnchorRect; mode: "edit"; pos: number };
 
 interface GhostState {
   from: number;
@@ -123,15 +184,27 @@ export function Editor({ initialMarkdown, onChange }: EditorProps) {
       TaskItem.configure({ nested: true }),
       Link.configure({ openOnClick: false }),
       MarkdownLinkShortcut,
+      AtMentionTrigger.configure({
+        onTrigger: (anchor) => {
+          setPicker({ anchor, mode: "insert" });
+          setGhost(null);
+        },
+        onDismiss: () => {
+          if (pickerRef.current?.mode === "insert") {
+            setPicker(null);
+          }
+        },
+      }),
       DueTime.configure({
         onEdit: (pos: number, iso: string) => {
           const el = containerRef.current?.querySelector<HTMLElement>(
             `span[data-due-time][data-datetime="${iso}"]`,
           );
           const rect = el?.getBoundingClientRect();
-          const x = rect ? rect.left : 20;
-          const y = rect ? rect.bottom + 4 : 20;
-          setPicker(clampToViewport({ x, y, mode: "edit" as const, pos }));
+          const anchor: AnchorRect = rect
+            ? { left: rect.left, top: rect.top, bottom: rect.bottom }
+            : { left: 20, top: 20, bottom: 40 };
+          setPicker({ anchor, mode: "edit", pos });
         },
       }),
     ],
@@ -142,12 +215,6 @@ export function Editor({ initialMarkdown, onChange }: EditorProps) {
     },
     editorProps: {
       handleKeyDown(view, event) {
-        if (event.key === "@" && !event.metaKey && !event.ctrlKey) {
-          const coords = view.coordsAtPos(view.state.selection.from);
-          setPicker(clampToViewport({ x: coords.left, y: coords.bottom + 4, mode: "insert" as const }));
-          event.preventDefault();
-          return true;
-        }
         // Tab 接受 ghost 时间预览
         if (event.key === "Tab" && ghostRef.current && !pickerRef.current) {
           const g = ghostRef.current;
@@ -276,16 +343,18 @@ export function Editor({ initialMarkdown, onChange }: EditorProps) {
         setGhost(null);
         return;
       }
+
       const { state } = editor;
       const sel = state.selection;
-      if (!sel.empty) {
+      const { $from, empty } = sel;
+
+      if (!empty) {
         setGhost(null);
         return;
       }
       // 取当前 paragraph/taskItem 起点到光标的纯文本。
       // 用 $from.parent 拿到最内层块节点（paragraph），再 textBetween 0 → offset；
       // 比 $from.start() + doc.textBetween 更鲁棒（对 taskItem > paragraph 结构友好）。
-      const $from = sel.$from;
       const text = $from.parent.textBetween(0, $from.parentOffset, "\n", " ");
       const hint = parseTimeHint(text);
       if (!hint) {
@@ -294,10 +363,14 @@ export function Editor({ initialMarkdown, onChange }: EditorProps) {
       }
       // 匹配文本可以不在 cursor 尾部（"今天 24 点吃饭"）：from/to 由 hint.start/end 换算 doc 坐标
       const paraStart = $from.start();
-      const from = paraStart + hint.start;
-      const to = paraStart + hint.end;
-      const coords = editor.view.coordsAtPos(to);
-      setGhost({ from, to, hint, x: coords.left, y: coords.bottom });
+      const fromPos = paraStart + hint.start;
+      const toPos = paraStart + hint.end;
+      try {
+        const coords = editor.view.coordsAtPos(toPos);
+        setGhost({ from: fromPos, to: toPos, hint, x: coords.left, y: coords.bottom });
+      } catch {
+        setGhost(null);
+      }
     };
     editor.on("update", update);
     editor.on("selectionUpdate", update);
@@ -495,8 +568,7 @@ export function Editor({ initialMarkdown, onChange }: EditorProps) {
       )}
       {picker && (
         <DueTimePicker
-          x={picker.x}
-          y={picker.y}
+          anchor={picker.anchor}
           onPick={handlePick}
           onCancel={() => setPicker(null)}
         />
@@ -567,17 +639,6 @@ function GhostPreview({ ghost, onAccept }: { ghost: GhostState; onAccept: () => 
       </span>
     </div>
   );
-}
-
-const PICKER_W = 200;
-const PICKER_H = 260;
-
-function clampToViewport<T extends { x: number; y: number }>(p: T): T {
-  const vw = window.innerWidth;
-  const vh = window.innerHeight;
-  const x = Math.max(8, Math.min(p.x, vw - PICKER_W - 8));
-  const y = p.y + PICKER_H > vh - 8 ? Math.max(8, p.y - PICKER_H - 24) : p.y;
-  return { ...p, x, y } as T;
 }
 
 function wrapCurrentList(editor: any, itemTypeName: string) {
