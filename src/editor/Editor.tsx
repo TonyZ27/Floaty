@@ -14,6 +14,7 @@ import { useEffect, useRef, useState } from "react";
 import { docToMarkdown, markdownToDoc } from "./markdown";
 import { DueTime, refreshAllPills } from "./DueTime";
 import { Priority, refreshAllPriorities, PriorityLevel } from "./Priority";
+import { Ligatures } from "./Ligatures";
 import { InsertPicker, type AnchorRect, type InsertChoice } from "./InsertPicker";
 import { parseTimeHint, type TimeHint } from "./timeHints";
 import { tierLabel, tierOf } from "../theme/urgency";
@@ -185,6 +186,7 @@ export function Editor({ initialMarkdown, onChange }: EditorProps) {
       TaskList,
       TaskItem.configure({ nested: true }),
       Link.configure({ openOnClick: false }),
+      Ligatures,
       MarkdownLinkShortcut,
       AtMentionTrigger.configure({
         onTrigger: (anchor) => {

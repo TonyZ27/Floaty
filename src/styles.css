@@ -159,6 +159,10 @@ ul[data-type="taskList"] li[data-checked="true"] > div {
   opacity: 0.5;
   text-decoration: line-through;
 }
+.ProseMirror {
+  font-variant-ligatures: contextual common-ligatures;
+  font-feature-settings: "liga" 1, "calt" 1;
+}
 .ProseMirror:focus {
   outline: none;
 }
